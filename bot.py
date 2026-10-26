@@ -10,7 +10,13 @@ from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 
 from psycopg.types.json import Jsonb
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    BotCommandScopeChat,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -686,10 +692,45 @@ COMMANDS = {
     "removeuser": removeuser,
 }
 
+# The Telegram command menu, set by the bot itself at start-up (no BotFather step).
+# /health is an alias of /status and stays out of the menu.
+MENU = [
+    ("start", "Register and show help"),
+    ("help", "Show the commands"),
+    ("status", "Last cycle and source health"),
+    ("latest", "Last advisories: /latest [vendor] [n] or /latest all [days]"),
+    ("vendors", "List monitored vendors"),
+    ("ask", "Ask a question about the alerts"),
+    ("severity", "Minimum severity of your alerts"),
+    ("mute", "Stop alerts for a vendor"),
+    ("unmute", "Resume alerts for a vendor"),
+]
+ADMIN_MENU = MENU + [
+    ("checknow", "Run a collection cycle now"),
+    ("addvendor", "Add a vendor, product or technology"),
+    ("removevendor", "Stop monitoring a vendor"),
+    ("users", "List users"),
+    ("adduser", "Give a user access"),
+    ("removeuser", "Remove a user's access"),
+]
+
+
+async def set_menu(app):
+    """Everyone sees the user commands; each admin's chat also lists the admin ones."""
+    await app.bot.set_my_commands([BotCommand(n, d) for n, d in MENU])
+    for admin in ADMINS:
+        try:
+            await app.bot.set_my_commands(
+                [BotCommand(n, d) for n, d in ADMIN_MENU],
+                scope=BotCommandScopeChat(admin),
+            )
+        except TelegramError as ex:  # e.g. this admin never wrote to the bot
+            log.warning("admin menu for %s not set: %s", admin, ex)
+
 
 def main():
     db.init()
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(TOKEN).post_init(set_menu).build()
     for name, fn in COMMANDS.items():
         app.add_handler(CommandHandler(name, fn, filters=PRIVATE))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(add|cancel|uok|uno):"))
