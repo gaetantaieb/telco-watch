@@ -4,6 +4,7 @@ import html
 import logging
 import os
 import secrets
+import sys
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -23,7 +24,22 @@ import db
 import onboard
 from llm import ask as llm_ask
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+def log_handlers():
+    """INFO to stdout, warnings and errors to stderr: Railway marks every stderr line as an error."""
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    out = logging.StreamHandler(sys.stdout)
+    out.addFilter(lambda r: r.levelno < logging.WARNING)
+    err = logging.StreamHandler(sys.stderr)
+    err.setLevel(logging.WARNING)
+    for h in (out, err):
+        h.setFormatter(fmt)
+    return [out, err]
+
+
+logging.basicConfig(level=logging.INFO, handlers=log_handlers())
+# httpx logs every request URL at INFO, and Telegram API URLs contain the bot token.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("telco-watch")
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
