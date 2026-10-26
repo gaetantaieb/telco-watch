@@ -7,9 +7,19 @@ from psycopg_pool import ConnectionPool
 
 KW = {"autocommit": True, "row_factory": dict_row}
 # Pools open lazily in init(), so tests can import this module without a database.
-pool = ConnectionPool(os.environ.get("DATABASE_URL", ""), kwargs=KW, open=False)
+# check= tests each connection before handing it out, so connections killed by a
+# database restart are replaced instead of failing the next command.
+CHECK = ConnectionPool.check_connection
+pool = ConnectionPool(
+    os.environ.get("DATABASE_URL", ""), kwargs=KW, open=False, check=CHECK
+)
 ro_pool = ConnectionPool(
-    os.environ.get("DATABASE_URL_RO", ""), kwargs=KW, open=False, min_size=1, max_size=2
+    os.environ.get("DATABASE_URL_RO", ""),
+    kwargs=KW,
+    open=False,
+    min_size=1,
+    max_size=2,
+    check=CHECK,
 )
 
 

@@ -176,9 +176,18 @@ def admin_only(fn):
 
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text(
-        "Telco Vendor Watch is running. Commands: /status /latest "
+        "Telco Vendor Watch is running. Commands: /help /status /latest "
         "/vendors /ask /checknow /addvendor /removevendor"
     )
+
+
+async def on_error(update: object, c: ContextTypes.DEFAULT_TYPE):
+    """Log a failed command and tell the user, instead of leaving them without a reply."""
+    log.error("update failed", exc_info=c.error)
+    if isinstance(update, Update) and update.effective_message:
+        await update.effective_message.reply_text(
+            "Something went wrong; try again in a moment."
+        )
 
 
 async def status(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -340,21 +349,27 @@ async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text(answer[:4000], disable_web_page_preview=True)
 
 
+COMMANDS = {
+    "start": start,
+    "help": start,
+    "status": status,
+    "health": status,
+    "latest": latest,
+    "vendors": vendors_cmd,
+    "checknow": checknow,
+    "ask": ask_cmd,
+    "addvendor": addvendor,
+    "removevendor": removevendor,
+}
+
+
 def main():
     db.init()
     app = Application.builder().token(TOKEN).build()
-    for name, fn in [
-        ("start", start),
-        ("status", status),
-        ("latest", latest),
-        ("vendors", vendors_cmd),
-        ("checknow", checknow),
-        ("ask", ask_cmd),
-        ("addvendor", addvendor),
-        ("removevendor", removevendor),
-    ]:
+    for name, fn in COMMANDS.items():
         app.add_handler(CommandHandler(name, fn, filters=ALLOWED))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(add|cancel):"))
+    app.add_error_handler(on_error)
     app.job_queue.run_repeating(cycle, interval=3600, first=10)  # hourly
     app.run_polling(drop_pending_updates=True)
 

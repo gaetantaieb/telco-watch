@@ -404,6 +404,23 @@ def test_ask_requires_a_question():
     assert u.message.replies[0].startswith("Usage: /ask")
 
 
+def test_help_and_health_are_commands():
+    assert bot.COMMANDS["help"] is bot.start
+    assert bot.COMMANDS["health"] is bot.status
+
+
+def test_failed_command_replies_to_the_user(monkeypatch):
+    monkeypatch.setattr(bot, "Update", SimpleNamespace)  # what update() builds
+    u = update(1)
+    run(bot.on_error(u, SimpleNamespace(error=RuntimeError("db down"))))
+    assert u.message.replies == ["Something went wrong; try again in a moment."]
+
+
+def test_pools_check_connections_before_use():
+    assert bot.db.pool._check is bot.db.CHECK
+    assert bot.db.ro_pool._check is bot.db.CHECK
+
+
 # ---------- /ask tools (section 5) ----------
 def test_search_alerts_is_parameterised(monkeypatch):
     calls = []
