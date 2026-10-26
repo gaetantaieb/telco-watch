@@ -1,0 +1,53 @@
+# Initial vendors and sources (spec section 2.2), loaded once into an empty database.
+# Afterwards vendors are managed from Telegram (/addvendor, /removevendor), not from here.
+#
+# nvd_keyword (defaults to name) is used twice: as the NVD keywordSearch, and as a
+# case-insensitive substring of the CISA KEV "vendorProject" field. Keep it short and
+# specific: a broad word (e.g. "Microsoft", "Oracle") floods NVD with unrelated CVEs.
+
+vendors:
+  # Tier 1: polled hourly from its own advisory source, plus KEV/NVD
+  - {name: Cisco}
+  - {name: Juniper}
+  - {name: Nokia}                                   # incl. Infinera
+  - {name: Ericsson}
+  - {name: Huawei}
+  - {name: ZTE}
+  - {name: Fortinet}
+  - {name: Palo Alto Networks, nvd_keyword: Palo Alto}
+
+  # Tier 2: covered hourly through NVD and CISA KEV
+  - {name: Samsung Networks, nvd_keyword: Samsung}
+  - {name: Mavenir}
+  - {name: Ciena}
+  - {name: Arista}
+  - {name: Ribbon Communications, nvd_keyword: Ribbon}
+  - {name: Oracle Communications}                  # SBC (Acme Packet), signalling, policy
+  - {name: F5}
+  - {name: Check Point}
+  - {name: Adtran}                                  # incl. Adva
+
+  # Tier 3: covered hourly through NVD and CISA KEV
+  - {name: Sagemcom}
+  - {name: Vantiva, nvd_keyword: Technicolor}       # ex-Technicolor
+  - {name: Zyxel}
+  - {name: Calix}
+  - {name: AudioCodes}
+  - {name: Microsoft, nvd_keyword: Metaswitch}      # Metaswitch, Azure Operator Nexus
+  - {name: VMware, nvd_keyword: VMware}             # Broadcom
+  - {name: Red Hat}                                 # OpenShift / OpenStack for CNF
+  - {name: Enea, nvd_keyword: AdaptiveMobile}       # Enea / AdaptiveMobile
+  - {name: Amdocs}                                  # Amdocs / Netcracker
+  - {name: CommScope, nvd_keyword: Arris}           # Arris: DOCSIS CMTS, cable CPE
+  - {name: Harmonic}                                # virtual CMTS, video headend
+
+sources:
+  - vendor: Cisco
+    type: rss
+    url: https://sec.cloudapps.cisco.com/security/center/psirtrss20/CiscoSecurityAdvisory.xml  # verify at setup
+  - vendor: Fortinet
+    type: rss
+    url: https://www.fortiguard.com/rss/ir.xml            # verify at setup
+  - vendor: Palo Alto Networks
+    type: rss
+    url: https://security.paloaltonetworks.com/rss.xml    # verify at setup
