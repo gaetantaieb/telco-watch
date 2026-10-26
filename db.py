@@ -49,8 +49,9 @@ def init():
         seed = yaml.safe_load(f)
     for v in seed["vendors"]:
         q(
-            "INSERT INTO vendors (name, nvd_keyword) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-            (v["name"], v.get("nvd_keyword", v["name"])),
+            "INSERT INTO vendors (name, nvd_keyword, nvd_cpe) VALUES (%s, %s, %s) "
+            "ON CONFLICT DO NOTHING",
+            (v["name"], v.get("nvd_keyword", v["name"]), v.get("nvd_cpe")),
         )
     for s in seed["sources"]:
         q(
