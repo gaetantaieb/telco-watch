@@ -801,6 +801,64 @@ def test_set_menu_sets_the_admin_menu_per_admin_chat(monkeypatch):
     assert len(calls) == 2
 
 
+class FakePoolConn:
+    def __init__(self, log):
+        self.log = log
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, stmt, params=()):
+        self.log.append(stmt.as_string(None))
+
+
+def run_ensure_ro(monkeypatch, rw, ro, exists=False):
+    log = []
+    monkeypatch.setattr(
+        bot.db,
+        "pool",
+        SimpleNamespace(conninfo=rw, connection=lambda: FakePoolConn(log)),
+    )
+    monkeypatch.setattr(bot.db, "ro_pool", SimpleNamespace(conninfo=ro))
+    monkeypatch.setattr(
+        bot.db, "q", lambda *a, **k: {"?column?": 1} if exists else None
+    )
+    bot.db.ensure_ro_role()
+    return log
+
+
+RW = "postgresql://postgres:secret@db.internal:5432/railway"
+
+
+def test_read_only_role_is_created_with_select_on_alerts_only(monkeypatch):
+    log = run_ensure_ro(
+        monkeypatch, RW, "postgresql://ask_ro:p%27w@db.internal:5432/railway"
+    )
+    assert log == [
+        "CREATE ROLE \"ask_ro\" LOGIN PASSWORD 'p''w'",  # quoted, not interpolated
+        'GRANT CONNECT ON DATABASE "railway" TO "ask_ro"',
+        'GRANT USAGE ON SCHEMA public TO "ask_ro"',
+        'GRANT SELECT ON items, vendors TO "ask_ro"',
+    ]
+
+
+def test_read_only_role_password_follows_the_variable(monkeypatch):
+    log = run_ensure_ro(
+        monkeypatch, RW, "postgresql://ask_ro:new@db.internal/railway", exists=True
+    )
+    assert log[0] == "ALTER ROLE \"ask_ro\" LOGIN PASSWORD 'new'"
+
+
+def test_no_role_when_both_urls_use_the_same_account(monkeypatch):
+    assert run_ensure_ro(monkeypatch, RW, RW) == []
+    assert (
+        run_ensure_ro(monkeypatch, RW, "postgresql://ask_ro@db.internal/railway") == []
+    )
+
+
 # ---------- /ask tools (section 5) ----------
 def test_search_alerts_is_parameterised(monkeypatch):
     calls = []
