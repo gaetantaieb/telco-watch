@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import sys
 from datetime import UTC, datetime
@@ -103,6 +104,23 @@ def test_fmt_contains_fields():
     assert "CVE-2026-1, CVE-2026-2" in text
     assert "https://x/a&amp;b" in text
     assert "<b>CVE:</b> —" in bot.fmt(item())
+
+
+# ---------- logging ----------
+def test_request_urls_with_the_bot_token_are_not_logged():
+    assert not logging.getLogger("httpx").isEnabledFor(logging.INFO)
+
+
+def test_info_goes_to_stdout_and_warnings_to_stderr(capsys):
+    handlers = bot.log_handlers()  # bound to the captured streams
+    for level, msg in ((logging.INFO, "cycle ok"), (logging.WARNING, "source down")):
+        record = logging.LogRecord("telco-watch", level, __file__, 1, msg, None, None)
+        for h in handlers:
+            if record.levelno >= h.level and h.filter(record):
+                h.handle(record)
+    out, err = capsys.readouterr()
+    assert "cycle ok" in out and "source down" not in out
+    assert "source down" in err and "cycle ok" not in err
 
 
 # ---------- URL safety ----------
