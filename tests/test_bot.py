@@ -777,6 +777,30 @@ def test_latest_with_a_vendor_still_works(monkeypatch):
     assert "vendor ILIKE" in calls[0][0] and calls[0][1] == ["%Cisco%", 3]
 
 
+def test_menu_lists_real_commands_and_admin_ones_only_for_admins():
+    names = [n for n, _ in bot.ADMIN_MENU]
+    assert set(names) <= set(bot.COMMANDS) and len(names) == len(set(names))
+    assert set(bot.COMMANDS) - set(names) == {"health"}  # alias, kept out of the menu
+    user_menu = {n for n, _ in bot.MENU}
+    assert {"checknow", "addvendor", "users"}.isdisjoint(user_menu)
+
+
+def test_set_menu_sets_the_admin_menu_per_admin_chat(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {42, 43})
+    calls = []
+
+    async def set_my_commands(commands, scope=None):
+        if scope is not None and scope.chat_id == 43:
+            raise bot.TelegramError("Bad Request: chat not found")
+        calls.append(([c.command for c in commands], scope and scope.chat_id))
+
+    app = SimpleNamespace(bot=SimpleNamespace(set_my_commands=set_my_commands))
+    run(bot.set_menu(app))  # one admin failing does not stop the others
+    assert calls[0] == ([n for n, _ in bot.MENU], None)
+    assert calls[1] == ([n for n, _ in bot.ADMIN_MENU], 42)
+    assert len(calls) == 2
+
+
 # ---------- /ask tools (section 5) ----------
 def test_search_alerts_is_parameterised(monkeypatch):
     calls = []
