@@ -15,7 +15,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test")
-os.environ.setdefault("ALLOWED_CHAT_IDS", "1")
 os.environ.setdefault("ANTHROPIC_API_KEY", "test")
 
 import bot
@@ -53,9 +52,22 @@ def test_kev_is_always_critical():
     assert bot.severity(item(kev=True)).startswith("🔴")
 
 
+def user(**kw):
+    base = {
+        "chat_id": 1,
+        "name": "Ana",
+        "status": "active",
+        "min_cvss": 7.0,
+        "muted": [],
+    }
+    base.update(kw)
+    return base
+
+
 def test_cvss_threshold():
-    assert not bot.worth_sending(item(cvss=5.0))
-    assert bot.worth_sending(item(cvss=9.8))
+    assert not bot.wants(user(), item(cvss=5.0))
+    assert bot.wants(user(), item(cvss=9.8))
+    assert bot.wants(user(min_cvss=4.0), item(cvss=5.0))  # /severity medium
 
 
 def test_titles_are_html_escaped():
@@ -92,8 +104,22 @@ def test_severity_bands(cvss, label):
 
 def test_unscored_advisories_are_sent():
     assert bot.severity(item()) == "🔵 ADVISORY"
-    assert bot.worth_sending(item())
-    assert bot.worth_sending(item(kev=True, cvss=2.0))
+    assert bot.wants(user(), item())
+    assert bot.wants(user(), item(kev=True, cvss=2.0))
+
+
+def test_muted_vendors_are_not_sent():
+    assert not bot.wants(user(muted=["Cisco"]), item(kev=True))
+    assert bot.wants(user(muted=["Nokia"]), item(kev=True))
+
+
+def test_level_names():
+    assert [bot.level_name(x) for x in (9.8, 7.0, 4.0, 0.0)] == [
+        "critical",
+        "high",
+        "medium",
+        "low",
+    ]
 
 
 def test_fmt_contains_fields():
@@ -320,7 +346,7 @@ class FakeBot:
         self.sent.append((chat, text))
 
 
-def run_cycle(monkeypatch, fake_db, kev_items, nvd_error=None):
+def run_cycle(monkeypatch, fake_db, kev_items, nvd_error=None, users=None):
     async def kev(client, vendors):
         return kev_items
 
@@ -333,6 +359,7 @@ def run_cycle(monkeypatch, fake_db, kev_items, nvd_error=None):
         return None
 
     monkeypatch.setattr(bot, "db", fake_db)
+    monkeypatch.setattr(bot, "active_users", lambda: users or [])
     monkeypatch.setattr(bot.col, "fetch_kev", kev)
     monkeypatch.setattr(bot.col, "fetch_nvd", nvd)
     monkeypatch.setattr(bot.asyncio, "sleep", no_sleep)
@@ -351,15 +378,40 @@ def test_first_run_stores_backlog_and_sends_nothing(monkeypatch):
 
 
 def test_new_items_are_sent_once_and_failures_reported(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {1})
+    users = [
+        user(chat_id=1),
+        user(chat_id=2, min_cvss=0.0),
+        user(chat_id=3, muted=["Cisco"]),
+    ]
     fake_db = FakeDB({"last_run": "2026-10-22T08:00:00+00:00"})
     items = [item(id="k", kev=True), item(id="low", cvss=2.0)]
-    sent = run_cycle(monkeypatch, fake_db, items, nvd_error=RuntimeError("down"))
-    assert len(sent) == 2  # one KEV alert + the "Sources failed" summary
-    assert "KEV" in sent[0][1]
-    assert sent[1][1] == "⚠️ Sources failed: NVD"
+    sent = run_cycle(
+        monkeypatch, fake_db, items, nvd_error=RuntimeError("down"), users=users
+    )
+    alerts = [
+        (chat, "KEV" in text) for chat, text in sent if "Sources failed" not in text
+    ]
+    # KEV goes to 1 and 2 (3 muted Cisco); the low one only to 2 (/severity low).
+    assert alerts == [(1, True), (2, True), (2, False)]
+    # Only admins hear about failing sources.
+    assert [chat for chat, text in sent if "Sources failed" in text] == [1]
     assert "failed: NVD" in fake_db.state["last_status"]
     # The same advisory is never sent twice.
-    assert run_cycle(monkeypatch, fake_db, items) == []
+    assert run_cycle(monkeypatch, fake_db, items, users=users) == []
+
+
+def test_a_user_who_blocked_the_bot_does_not_stop_the_others():
+    class Bot(FakeBot):
+        async def send_message(self, chat, text, **kw):
+            if chat == 1:
+                raise bot.TelegramError("Forbidden: bot was blocked by the user")
+            await super().send_message(chat, text, **kw)
+
+    fake_bot = Bot()
+    assert not run(bot.send(fake_bot, 1, "x"))
+    assert run(bot.send(fake_bot, 2, "x"))
+    assert fake_bot.sent == [(2, "x")]
 
 
 # ---------- commands ----------
@@ -371,11 +423,167 @@ class FakeMessage:
         self.replies.append(text)
 
 
-def update(user_id):
+def update(user_id, name="Ana"):
     msg = FakeMessage()
     return SimpleNamespace(
-        effective_user=SimpleNamespace(id=user_id), effective_message=msg, message=msg
+        effective_user=SimpleNamespace(id=user_id, full_name=name),
+        effective_message=msg,
+        message=msg,
     )
+
+
+class FakeUsers:
+    """In-memory users table behind bot's user functions."""
+
+    def __init__(self, monkeypatch, *rows):
+        self.rows = {r["chat_id"]: dict(r) for r in rows}
+        for name in (
+            "get_user",
+            "save_user",
+            "decide_user",
+            "set_user_status",
+            "set_min_cvss",
+            "set_muted",
+            "find_vendor",
+        ):
+            monkeypatch.setattr(bot, name, getattr(self, name))
+
+    def get_user(self, uid):
+        return self.rows.get(uid)
+
+    def save_user(self, uid, name, status):
+        row = self.rows.setdefault(uid, user(chat_id=uid))
+        row.update(name=name, status=status)
+
+    def decide_user(self, uid, status, admin_id):
+        row = self.rows.get(uid)
+        if not row or row["status"] != "pending":
+            return None
+        row["status"] = status
+        return row
+
+    def set_user_status(self, uid, status, admin_id):
+        row = self.rows.get(uid)
+        if row:
+            row["status"] = status
+        return row
+
+    def set_min_cvss(self, uid, score):
+        self.rows[uid]["min_cvss"] = score
+
+    def set_muted(self, uid, vendor, muted):
+        rest = [v for v in self.rows[uid]["muted"] if v != vendor]
+        self.rows[uid]["muted"] = rest + [vendor] if muted else rest
+
+    def find_vendor(self, name):
+        return {"name": "Cisco"} if name.lower() == "cisco" else None
+
+
+def ctx(args=(), fake_bot=None):
+    return SimpleNamespace(args=list(args), bot=fake_bot or FakeBot())
+
+
+def test_new_user_request_goes_to_the_admins(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {42})
+    users = FakeUsers(monkeypatch)
+    c = ctx()
+    u = update(7, "Bob")
+    run(bot.start(u, c))
+    assert users.rows[7]["status"] == "pending"
+    assert c.bot.sent == [(42, "Access request from Bob (id 7).")]
+    assert "sent to the admins" in u.message.replies[0]
+    # Asking again does not notify the admins a second time.
+    run(bot.start(update(7, "Bob"), c))
+    assert len(c.bot.sent) == 1
+
+
+def test_admins_are_active_without_approval(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {42})
+    users = FakeUsers(monkeypatch)
+    u = update(42)
+    run(bot.start(u, ctx()))
+    assert users.rows[42]["status"] == "active"
+    assert "/adduser" in u.message.replies[0]  # admins see the admin commands
+
+
+def test_members_see_help_and_removed_users_get_no_answer(monkeypatch):
+    FakeUsers(monkeypatch, user(chat_id=1), user(chat_id=2, status="blocked"))
+    member, removed = update(1), update(2)
+    run(bot.start(member, ctx()))
+    run(bot.start(removed, ctx()))
+    assert member.message.replies == [bot.HELP]
+    assert removed.message.replies == []
+
+
+def test_commands_need_access(monkeypatch):
+    FakeUsers(monkeypatch, user(chat_id=7, status="pending"))
+    for cmd in (
+        bot.status,
+        bot.latest,
+        bot.vendors_cmd,
+        bot.ask_cmd,
+        bot.severity_cmd,
+        bot.mute,
+    ):
+        u = update(7)
+        run(cmd(u, ctx()))
+        assert u.message.replies == [
+            "You don't have access yet: send /start to request it."
+        ]
+
+
+def test_approve_button_activates_and_tells_the_user(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {42})
+    users = FakeUsers(monkeypatch, user(chat_id=7, status="pending"))
+    edits = []
+
+    async def answer(*a, **kw):
+        return None
+
+    async def edit(text):
+        edits.append(text)
+
+    qy = SimpleNamespace(
+        from_user=SimpleNamespace(id=42, first_name="Admin"),
+        answer=answer,
+        edit_message_text=edit,
+        message=SimpleNamespace(text="Access request from Bob (id 7)."),
+        data="uok:7",
+    )
+    c = ctx()
+    run(bot.on_button(SimpleNamespace(callback_query=qy), c))
+    assert users.rows[7]["status"] == "active"
+    assert edits[-1].endswith("Approved by Admin.")
+    assert c.bot.sent[0][0] == 7 and "approved" in c.bot.sent[0][1]
+    # A second tap (or another admin) cannot decide again.
+    run(bot.on_button(SimpleNamespace(callback_query=qy), c))
+    assert edits[-1].endswith("Already decided.")
+
+
+def test_severity_and_mute_are_personal(monkeypatch):
+    users = FakeUsers(monkeypatch, user(chat_id=1), user(chat_id=2))
+    run(bot.severity_cmd(update(1), ctx(["medium"])))
+    run(bot.mute(update(1), ctx(["cisco"])))
+    assert users.rows[1]["min_cvss"] == 4.0 and users.rows[1]["muted"] == ["Cisco"]
+    assert users.rows[2]["min_cvss"] == 7.0 and users.rows[2]["muted"] == []
+    run(bot.unmute(update(1), ctx(["Cisco"])))
+    assert users.rows[1]["muted"] == []
+    u = update(1)
+    run(bot.mute(u, ctx(["Unknown"])))
+    assert u.message.replies == ["Unknown vendor, see /vendors."]
+
+
+def test_admins_add_and_remove_users(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {42})
+    users = FakeUsers(monkeypatch, user(chat_id=7, name="Bob"))
+    run(bot.removeuser(update(42), ctx(["7"])))
+    assert users.rows[7]["status"] == "blocked"
+    c = ctx(["8"])
+    run(bot.adduser(update(42), c))
+    assert users.rows[8]["status"] == "active" and c.bot.sent[0][0] == 8
+    u = update(7)
+    run(bot.adduser(u, ctx(["9"])))
+    assert u.message.replies == ["Admins only."]
 
 
 def test_admin_commands_refuse_non_admins(monkeypatch):
@@ -398,7 +606,8 @@ def test_approve_button_refuses_non_admins(monkeypatch):
     assert answers == ["Admins only."]
 
 
-def test_ask_requires_a_question():
+def test_ask_requires_a_question(monkeypatch):
+    FakeUsers(monkeypatch, user(chat_id=1))
     u = update(1)
     run(bot.ask_cmd(u, SimpleNamespace(args=[])))
     assert u.message.replies[0].startswith("Usage: /ask")
@@ -407,6 +616,10 @@ def test_ask_requires_a_question():
 def test_help_and_health_are_commands():
     assert bot.COMMANDS["help"] is bot.start
     assert bot.COMMANDS["health"] is bot.status
+
+
+def test_commands_only_work_in_private_chats():
+    assert bot.PRIVATE is bot.filters.ChatType.PRIVATE
 
 
 def test_failed_command_replies_to_the_user(monkeypatch):

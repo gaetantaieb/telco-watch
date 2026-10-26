@@ -31,3 +31,13 @@ CREATE INDEX IF NOT EXISTS items_seen_at ON items (seen_at DESC);
 CREATE INDEX IF NOT EXISTS items_vendor ON items (vendor);
 
 CREATE TABLE IF NOT EXISTS state (k TEXT PRIMARY KEY, v TEXT);
+
+CREATE TABLE IF NOT EXISTS users (                   -- people using the bot in a private chat
+    chat_id     BIGINT PRIMARY KEY,                  -- Telegram user id (= their private chat id)
+    name        TEXT,
+    status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'active', 'blocked')),
+    min_cvss    REAL NOT NULL DEFAULT 7.0,           -- /severity: alerts at or above this score
+    muted       TEXT[] NOT NULL DEFAULT '{}',        -- /mute: vendors this user gets no alerts for
+    approved_by BIGINT,                              -- Telegram id of the admin who decided
+    added_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
