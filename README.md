@@ -93,13 +93,12 @@ feeds ────┘                         └─> Telegram: one private chat
 3. **Railway**: create a project from this repository, add a PostgreSQL
    database, and set the variables below on the bot service. Keep 1 replica
    and no public domain (the bot uses long polling).
-4. **Read-only role for `/ask`** (production), in a database shell:
-   ```sql
-   CREATE ROLE ask_ro LOGIN PASSWORD '<long random password>';
-   GRANT CONNECT ON DATABASE railway TO ask_ro;
-   GRANT USAGE ON SCHEMA public TO ask_ro;
-   GRANT SELECT ON items, vendors TO ask_ro;
-   ```
+4. **Read-only role for `/ask`** (production): add a variable `ASK_RO_PASSWORD`
+   (a long random string) and set `DATABASE_URL_RO` to
+   `postgresql://ask_ro:${{ASK_RO_PASSWORD}}@${{Postgres.PGHOST}}:${{Postgres.PGPORT}}/${{Postgres.PGDATABASE}}`.
+   At every start the bot creates the `ask_ro` role (or resets its password)
+   with `SELECT` on `items` and `vendors` only. No SQL to run by hand; change
+   `ASK_RO_PASSWORD` to rotate it.
 5. **First start**: the tables are created, `seed.yaml` is loaded, and the first
    cycle stores the backlog without sending anything. Each admin then sends
    `/start` to the bot in a private chat.
@@ -111,7 +110,8 @@ feeds ────┘                         └─> Telegram: one private chat
 | `TELEGRAM_BOT_TOKEN` | Bot token from BotFather |
 | `ADMIN_USER_IDS` | Telegram user ids of the admins, comma-separated |
 | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` |
-| `DATABASE_URL_RO` | URL of the `ask_ro` role (in development, `${{Postgres.DATABASE_URL}}` is fine) |
+| `DATABASE_URL_RO` | URL of the read-only `ask_ro` role, created by the bot (in development, `${{Postgres.DATABASE_URL}}` is fine) |
+| `ASK_RO_PASSWORD` | Password of `ask_ro`, referenced by `DATABASE_URL_RO` (production) |
 | `NVD_API_KEY` | NVD API key |
 | `ANTHROPIC_API_KEY` | Claude API key |
 | `LLM_MODEL` | Model for `/ask`, e.g. `claude-haiku-5-5` |
