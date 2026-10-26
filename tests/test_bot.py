@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -665,6 +665,116 @@ def test_failed_command_replies_to_the_user(monkeypatch):
 def test_pools_check_connections_before_use():
     assert bot.db.pool._check is bot.db.CHECK
     assert bot.db.ro_pool._check is bot.db.CHECK
+
+
+@pytest.mark.parametrize(
+    "published, expected",
+    [
+        ("2026-10-22T09:14:00.000", datetime(2026, 10, 22, 9, 14, tzinfo=UTC)),  # NVD
+        ("2026-10-20", datetime(2026, 10, 20, tzinfo=UTC)),  # KEV
+        (
+            "Thu, 22 Oct 2026 09:14:00 GMT",
+            datetime(2026, 10, 22, 9, 14, tzinfo=UTC),
+        ),  # RSS
+        ("", datetime(2026, 10, 1, tzinfo=UTC)),  # HTML page: no date, use seen_at
+        ("next week", datetime(2026, 10, 1, tzinfo=UTC)),
+    ],
+)
+def test_published_at_reads_every_source_format(published, expected):
+    it = item(published=published, seen_at=datetime(2026, 10, 1, tzinfo=UTC))
+    assert bot.published_at(it) == expected
+
+
+def ago(days):
+    return (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+
+def run_latest_all(monkeypatch, rows, args):
+    calls = []
+
+    def q(sql, params=(), one=False):
+        calls.append((sql, params))
+        return rows
+
+    FakeUsers(monkeypatch, user(chat_id=1))
+    monkeypatch.setattr(bot.db, "q", q)
+    u = update(1)
+    run(bot.latest(u, ctx(args)))
+    return u.message.replies, calls
+
+
+def test_latest_all_lists_high_and_above_by_publication_date(monkeypatch):
+    now = datetime.now(UTC)
+    rows = [
+        item(id="a", vendor="Nokia", cvss=7.5, published=ago(2), seen_at=now),
+        item(id="b", vendor="Cisco", cvss=9.8, published=ago(1), seen_at=now),
+        item(
+            id="c",
+            vendor="ZTE",
+            kev=True,
+            cvss=None,
+            cves=["CVE-2026-9"],
+            published=ago(3),
+            seen_at=now,
+        ),
+        item(
+            id="old", vendor="Huawei", kev=True, published="2021-05-01", seen_at=now
+        ),  # backlog
+        item(
+            id="adv",
+            vendor="Fortinet",
+            title="FortiOS advisory",
+            published=ago(1),
+            seen_at=now,
+        ),
+    ]
+    replies, calls = run_latest_all(monkeypatch, rows, ["all", "5"])
+    sql, params = calls[0]
+    assert "kev OR cvss >= %s" in sql and params == (7.0, 5)
+    text = "\n\n".join(replies)
+    assert text.startswith("High and above, all vendors, last 5 days: 3")
+    # KEV first, then by score; the 2021 KEV entry stored today is left out.
+    assert text.index("ZTE") < text.index("Cisco") < text.index("Nokia")
+    assert "Huawei" not in text
+    assert "without a CVSS score: 1" in text and "FortiOS advisory" in text
+
+
+def test_latest_all_defaults_to_7_days_and_caps_at_90(monkeypatch):
+    _, calls = run_latest_all(monkeypatch, [], ["all"])
+    assert calls[0][1] == (7.0, 7)
+    replies, calls = run_latest_all(monkeypatch, [], ["ALL", "365"])
+    assert calls[0][1] == (7.0, 90)
+    assert replies == ["No high or critical alert in the last 90 days."]
+
+
+def test_latest_all_splits_long_lists_and_caps_them(monkeypatch):
+    now = datetime.now(UTC)
+    rows = [
+        item(
+            id=str(i),
+            cvss=9.0,
+            title="x" * 100,
+            url="https://e.example/" + "y" * 60,
+            published=ago(1),
+            seen_at=now,
+        )
+        for i in range(60)
+    ]
+    replies, _ = run_latest_all(monkeypatch, rows, ["all", "3"])
+    assert len(replies) > 1 and all(len(r) <= 4000 for r in replies)
+    assert replies[-1].endswith("…and 20 more: try a shorter period or /ask.")
+
+
+def test_brief_names_the_cves_or_nothing():
+    assert bot.brief(item(cvss=9.8, cves=["CVE-2026-1"])).startswith(
+        "🔴 CRITICAL · CVSS 9.8 · Cisco · CVE-2026-1\n"
+    )
+    assert bot.brief(item()).startswith("🔵 ADVISORY · Cisco\n")
+
+
+def test_latest_with_a_vendor_still_works(monkeypatch):
+    _, calls = run_latest_all(monkeypatch, [], ["Cisco", "3"])
+    assert "vendor ILIKE" in calls[0][0] and calls[0][1] == ["%Cisco%", 3]
 
 
 # ---------- /ask tools (section 5) ----------

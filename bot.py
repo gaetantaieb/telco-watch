@@ -7,6 +7,7 @@ import secrets
 import sys
 import time
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 
 from psycopg.types.json import Jsonb
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -271,6 +272,7 @@ HELP = (
     "Telco Vendor Watch sends you vendor security advisories as they are published.\n\n"
     "/status: last collection cycle\n"
     "/latest [vendor] [n]: last advisories\n"
+    "/latest all [days]: high and above from all vendors, published in the last days (default 7)\n"
     "/vendors: monitored vendors\n"
     "/ask <question>: ask about the stored alerts\n"
     "/severity <critical|high|medium|low>: minimum severity of your alerts\n"
@@ -336,6 +338,9 @@ async def status(u: Update, c: ContextTypes.DEFAULT_TYPE):
 @members_only
 async def latest(u: Update, c: ContextTypes.DEFAULT_TYPE):
     args = c.args or []
+    if args and args[0].lower() == "all":
+        days = int(args[1]) if len(args) > 1 and args[1].isdigit() else 7
+        return await latest_all(u, max(1, min(days, 90)))
     n = int(args[-1]) if args and args[-1].isdigit() else 5
     vendor = args[0] if args and not args[0].isdigit() else None
     sql = "SELECT * FROM items" + (" WHERE vendor ILIKE %s" if vendor else "")
@@ -347,6 +352,69 @@ async def latest(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await u.message.reply_text(
             fmt(it), parse_mode=ParseMode.HTML, disable_web_page_preview=True
         )
+
+
+def published_at(it):
+    """The vendor's publication time; formats differ by source, so fall back to collection time."""
+    raw = (it["published"] or "").strip()
+    for parse in (datetime.fromisoformat, parsedate_to_datetime):
+        try:
+            dt = parse(raw)
+        except (TypeError, ValueError, IndexError):
+            continue
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    return it["seen_at"]
+
+
+def brief(it):
+    score = f" · CVSS {it['cvss']}" if it["cvss"] is not None else ""
+    cves = f" · {', '.join(it['cves'])}" if it["cves"] else ""
+    title = (it["title"] or "")[:100]
+    return f"{severity(it)}{score} · {it['vendor']}{cves}\n{title}\n{it['url'] or ''}"
+
+
+def chunks(blocks, limit=4000):
+    """Join blocks into as few messages as possible under Telegram's size limit."""
+    out, cur = [], ""
+    for b in blocks:
+        if cur and len(cur) + len(b) + 2 > limit:
+            out.append(cur)
+            cur = ""
+        cur = f"{cur}\n\n{b}" if cur else b
+    return out + [cur] if cur else out
+
+
+async def latest_all(u: Update, days, cap=40):
+    """/latest all [days]: high and above from every vendor, by publication date."""
+    # An advisory published in the last days was also collected in them (never before).
+    rows = db.q(
+        "SELECT * FROM items WHERE (kev OR cvss >= %s OR cvss IS NULL) "
+        "AND seen_at >= now() - %s * interval '1 day'",
+        (LEVELS["high"], days),
+    )
+    since = datetime.now(UTC) - timedelta(days=days)
+    rows = [r for r in rows if published_at(r) >= since]
+    scored = [r for r in rows if r["kev"] or r["cvss"] is not None]
+    unscored = [r for r in rows if not r["kev"] and r["cvss"] is None]
+    scored.sort(
+        key=lambda r: (not r["kev"], -(r["cvss"] or 0), -published_at(r).timestamp())
+    )
+    unscored.sort(key=lambda r: -published_at(r).timestamp())
+    if not scored and not unscored:
+        return await u.message.reply_text(
+            f"No high or critical alert in the last {days} days."
+        )
+    blocks = [f"High and above, all vendors, last {days} days: {len(scored)}"]
+    blocks += [brief(r) for r in scored[:cap]]
+    if len(scored) > cap:
+        blocks.append(f"…and {len(scored) - cap} more: try a shorter period or /ask.")
+    if unscored:
+        blocks.append(f"Vendor advisories without a CVSS score: {len(unscored)}")
+        blocks += [brief(r) for r in unscored[: cap // 2]]
+        if len(unscored) > cap // 2:
+            blocks.append(f"…and {len(unscored) - cap // 2} more.")
+    for text in chunks(blocks):
+        await u.message.reply_text(text, disable_web_page_preview=True)
 
 
 @members_only
