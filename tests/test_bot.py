@@ -257,12 +257,14 @@ def test_fetch_kev_keeps_only_in_scope_vendors():
             {
                 "cveID": "CVE-2026-0001",
                 "vendorProject": "Palo Alto Networks",
+                "product": "PAN-OS",
                 "vulnerabilityName": "PAN-OS command injection",
                 "dateAdded": "2026-10-20",
             },
             {
                 "cveID": "CVE-2026-0002",
                 "vendorProject": "SomeoneElse",
+                "product": "Thing",
                 "vulnerabilityName": "Unrelated",
                 "dateAdded": "2026-10-20",
             },
@@ -273,6 +275,37 @@ def test_fetch_kev_keeps_only_in_scope_vendors():
     assert it["vendor"] == "Palo Alto Networks"
     assert it["id"] == "KEV-CVE-2026-0001"
     assert it["kev"] and it["cves"] == ["CVE-2026-0001"]
+
+
+def test_kev_keywords_match_whole_words_in_vendor_or_product():
+    assert collectors.kev_matches("PHP", "PHP PHP")
+    assert collectors.kev_matches("php", "The PHP Group PHP-FPM")
+    assert not collectors.kev_matches("PHP", "phpMyAdmin phpMyAdmin")
+    assert collectors.kev_matches("Palo Alto", "Palo Alto Networks PAN-OS")
+    assert collectors.kev_matches("Kubernetes", "Kubernetes Ingress-nginx")
+    assert not collectors.kev_matches("ZTE", "Aztec Router")
+
+
+def test_fetch_nvd_uses_the_cpe_when_there_is_one(monkeypatch):
+    async def no_sleep(s):
+        return None
+
+    monkeypatch.setattr(collectors.asyncio, "sleep", no_sleep)
+    seen = []
+
+    def handler(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json={"vulnerabilities": []})
+
+    vendors = [
+        {"name": "PHP", "nvd_keyword": "PHP", "nvd_cpe": "cpe:2.3:a:php:php"},
+        {"name": "Cisco", "nvd_keyword": "Cisco", "nvd_cpe": None},
+    ]
+    since = datetime(2026, 10, 22, tzinfo=UTC)
+    run(collectors.fetch_nvd(mock_client(handler), vendors, since))
+    assert seen[0]["virtualMatchString"] == "cpe:2.3:a:php:php"
+    assert "keywordSearch" not in seen[0]
+    assert seen[1]["keywordSearch"] == "Cisco" and "virtualMatchString" not in seen[1]
 
 
 def test_fetch_nvd_reads_best_cvss_and_queries_since(monkeypatch):
@@ -755,6 +788,43 @@ def test_discover_validates_llm_output(monkeypatch):
     assert found["nvd_keyword"] == "Zyxel"
     assert [s["type"] for s in found["sources"]] == ["html", "rss"]
     assert found["sources"][1]["config"] == {}
+
+
+@pytest.mark.parametrize(
+    "cpe, expected",
+    [
+        ("cpe:2.3:a:php:php", "cpe:2.3:a:php:php"),
+        ("CPE:2.3:O:Cisco:IOS_XR", "cpe:2.3:o:cisco:ios_xr"),
+        ("cpe:2.3:a:openssl", "cpe:2.3:a:openssl"),
+        ("", None),
+        ("cpe:2.3:a:php:php;DROP", None),
+        ("php", None),
+    ],
+)
+def test_discover_keeps_only_valid_cpes(monkeypatch, cpe, expected):
+    answer = json.dumps(
+        {"vendor": "PHP", "nvd_keyword": "PHP", "nvd_cpe": cpe, "sources": []}
+    )
+    fake = FakeMessages(
+        [SimpleNamespace(stop_reason="end_turn", content=[block("text", text=answer)])]
+    )
+    monkeypatch.setattr(onboard, "client", SimpleNamespace(messages=fake))
+    found = run(onboard.discover("php"))
+    assert found["nvd_cpe"] == expected
+    assert "telecom equipment vendor" not in fake.calls[0]["messages"][0]["content"]
+
+
+def test_count_cves_uses_the_proposed_match(monkeypatch):
+    seen = []
+
+    async def fake_nvd(client, vendors, since):
+        seen.append(vendors[0])
+        return [{}, {}, {}]
+
+    monkeypatch.setattr(onboard.col, "fetch_nvd", fake_nvd)
+    found = {"vendor": "PHP", "nvd_keyword": "PHP", "nvd_cpe": "cpe:2.3:a:php:php"}
+    assert run(onboard.count_cves(found)) == 3
+    assert seen[0]["nvd_cpe"] == "cpe:2.3:a:php:php"
 
 
 def test_discover_without_json_fails(monkeypatch):

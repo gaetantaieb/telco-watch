@@ -121,13 +121,21 @@ FETCHERS = {"rss": fetch_rss, "json": fetch_json, "html": fetch_html}
 
 
 # ---------- global sources, filtered by the vendors table ----------
+def kev_matches(keyword, name):
+    """Whole-word match on the KEV vendor and product, so "PHP" does not match phpMyAdmin."""
+    return (
+        re.search(rf"(?<!\w){re.escape(keyword)}(?!\w)", name, re.IGNORECASE)
+        is not None
+    )
+
+
 async def fetch_kev(client, vendors):
     r = await client.get(KEV_URL)
     r.raise_for_status()
     out = []
     for v in r.json()["vulnerabilities"]:
-        project = v["vendorProject"].lower()
-        match = next((x for x in vendors if x["nvd_keyword"].lower() in project), None)
+        name = f"{v['vendorProject']} {v['product']}"
+        match = next((x for x in vendors if kev_matches(x["nvd_keyword"], name)), None)
         if match:
             out.append(
                 item(
@@ -148,8 +156,14 @@ async def fetch_nvd(client, vendors, since):
     headers = {"apiKey": NVD_KEY} if NVD_KEY else {}
     out = []
     for v in vendors:
+        # A CPE (product) match is exact; a keyword also hits CVEs that merely mention it.
+        query = (
+            {"virtualMatchString": v["nvd_cpe"]}
+            if v.get("nvd_cpe")
+            else {"keywordSearch": v["nvd_keyword"]}
+        )
         params = {
-            "keywordSearch": v["nvd_keyword"],
+            **query,
             "lastModStartDate": since.isoformat(timespec="milliseconds"),
             "lastModEndDate": now.isoformat(timespec="milliseconds"),
         }

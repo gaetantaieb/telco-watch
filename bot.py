@@ -188,7 +188,7 @@ async def cycle(context: ContextTypes.DEFAULT_TYPE):
     last = db.get_state("last_run")
     first_run = last is None  # store the backlog, send nothing
     since = datetime.fromisoformat(last) if last else started - timedelta(hours=24)
-    vendors = db.q("SELECT name, nvd_keyword FROM vendors WHERE enabled")
+    vendors = db.q("SELECT name, nvd_keyword, nvd_cpe FROM vendors WHERE enabled")
     sources = db.q(
         "SELECT s.* FROM sources s JOIN vendors v ON v.name = s.vendor WHERE s.enabled AND v.enabled"
     )
@@ -374,7 +374,9 @@ async def checknow(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def addvendor(u: Update, c: ContextTypes.DEFAULT_TYPE):
     name = " ".join(c.args or []).strip()
     if not name or len(name) > 60:
-        return await u.message.reply_text("Usage: /addvendor <vendor name>")
+        return await u.message.reply_text(
+            "Usage: /addvendor <vendor, product or technology>, e.g. /addvendor PHP"
+        )
     await u.message.reply_text(
         f"Searching the advisory sources of {name}… (about a minute)"
     )
@@ -385,7 +387,18 @@ async def addvendor(u: Update, c: ContextTypes.DEFAULT_TYPE):
         return await u.message.reply_text(
             "Discovery failed; try again or check the logs."
         )
-    lines = [f"Vendor: {found['vendor']} (NVD keyword: {found['nvd_keyword']})"]
+    match = (
+        f"CPE {found['nvd_cpe']}"
+        if found["nvd_cpe"]
+        else f"keyword {found['nvd_keyword']}"
+    )
+    lines = [
+        f"Vendor: {found['vendor']} (NVD {match}, KEV keyword {found['nvd_keyword']})"
+    ]
+    try:
+        lines.append(f"NVD: {await onboard.count_cves(found)} CVEs in the last 30 days")
+    except Exception as ex:  # noqa: BLE001 - the count is only informative
+        log.warning("NVD count failed: %s", ex)
     working = []
     for src in found["sources"]:
         ok, msg, sample = await onboard.test_source(src)
@@ -429,9 +442,10 @@ async def on_button(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if action == "cancel":
         return await qy.edit_message_text(qy.message.text + "\n\nCancelled.")
     db.q(
-        "INSERT INTO vendors (name, nvd_keyword) VALUES (%s, %s) ON CONFLICT (name) "
-        "DO UPDATE SET enabled = TRUE, nvd_keyword = EXCLUDED.nvd_keyword",
-        (p["vendor"], p["nvd_keyword"]),
+        "INSERT INTO vendors (name, nvd_keyword, nvd_cpe) VALUES (%s, %s, %s) "
+        "ON CONFLICT (name) DO UPDATE SET enabled = TRUE, "
+        "nvd_keyword = EXCLUDED.nvd_keyword, nvd_cpe = EXCLUDED.nvd_cpe",
+        (p["vendor"], p["nvd_keyword"], p["nvd_cpe"]),
     )
     for s in p["sources"]:
         db.q(

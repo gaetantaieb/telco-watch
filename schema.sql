@@ -41,3 +41,7 @@ CREATE TABLE IF NOT EXISTS users (                   -- people using the bot in 
     approved_by BIGINT,                              -- Telegram id of the admin who decided
     added_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- A product or technology (e.g. PHP) is matched in NVD by its CPE instead of a keyword,
+-- so CVEs that only mention it ("a PHP application...") are not collected.
+ALTER TABLE vendors ADD COLUMN IF NOT EXISTS nvd_cpe TEXT;     -- e.g. cpe:2.3:a:php:php
