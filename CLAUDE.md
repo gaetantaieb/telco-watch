@@ -1,8 +1,9 @@
 # Telco Vendor Watch
 
 Telegram bot that polls telecom vendor security advisories every hour, stores them
-in Railway Postgres and alerts a Telegram group. Hosted on Railway only.
-Spec: https://claude.ai/artifact/3iSAhCK5aMBuaJNkDFvSd8
+in Railway Postgres and alerts approved users in private chats. Hosted on Railway only.
+Spec of the current version: docs/spec.md (keep it up to date with every feature change).
+Original design: docs/specs.pdf. Overview and setup: README.md.
 
 ## Commands
 - Run locally on the development environment: `railway run python bot.py`
