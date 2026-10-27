@@ -144,9 +144,8 @@ async def fetch_rss(client, src):
 
 
 async def fetch_json(client, src):
-    cfg = src[
-        "config"
-    ]  # {"list": "a.b", "id", "title", "url", "date", "updated", "severity"}
+    # config: {"list": "a.b", "id", "title", "url", "date", "updated", "severity"}
+    cfg = src["config"]
     r = await client.get(src["url"])
     r.raise_for_status()
     data = r.json()
