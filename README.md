@@ -48,7 +48,7 @@ Everyone (after approval):
 | `/severity <critical\|high\|medium\|low>` | Minimum severity of your alerts (default high) |
 | `/mute <vendor>`, `/unmute <vendor>` | Stop or resume one vendor's alerts for you |
 
-Admins (`ADMIN_USER_IDS`):
+Admins (`ADMIN_USER_IDS`, plus users promoted with `/promote`):
 
 | Command | Effect |
 |---|---|
@@ -57,6 +57,7 @@ Admins (`ADMIN_USER_IDS`):
 | `/removevendor <name>` | Disable a vendor and its sources; history is kept |
 | `/users` | List users and their status |
 | `/adduser <id>`, `/removeuser <id>` | Give or remove access |
+| `/promote <id>`, `/demote <id>` | Give or take back the admin role (`ADMIN_USER_IDS` admins only) |
 
 ## Architecture
 
@@ -108,7 +109,7 @@ feeds ────┘                         └─> Telegram: one private chat
 | Variable | Value |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Bot token from BotFather |
-| `ADMIN_USER_IDS` | Telegram user ids of the admins, comma-separated |
+| `ADMIN_USER_IDS` | Telegram user ids of the permanent admins, comma-separated; they alone can `/promote` others |
 | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` |
 | `DATABASE_URL_RO` | URL of the read-only `ask_ro` role, created by the bot (in development, `${{Postgres.DATABASE_URL}}` is fine) |
 | `ASK_RO_PASSWORD` | Password of `ask_ro`, referenced by `DATABASE_URL_RO` (production) |

@@ -86,7 +86,7 @@ is missing.
 | `vendors` | name, `nvd_keyword`, optional `nvd_cpe`, enabled, added_at |
 | `sources` | vendor, type (`rss`, `json`, `html`), url, parsing config, enabled, approving admin (`added_by`), added_at |
 | `items` | key = sha256(vendor + advisory id), vendor, title, url, CVEs, CVSS, KEV flag, publication date as given by the source, vendor `rating` (when there is no CVSS), `published_at` (parsed from it, else the collection time), `updated_at` (the source's last change: NVD `lastModified`, RSS/Atom `updated`, JSON `updated` field), `seen_at` |
-| `users` | Telegram id, name, status (`pending`, `active`, `blocked`), `min_cvss`, muted vendors, approving admin, added_at |
+| `users` | Telegram id, name, status (`pending`, `active`, `blocked`), role (`user`, `admin` after `/promote`), `min_cvss`, muted vendors, approving admin, added_at |
 | `state` | `last_run`, `last_status` |
 
 Every item is stored whatever its score. An item is stored once: the same
@@ -159,9 +159,15 @@ The bot only works in private chats; it ignores groups.
   second `/start` while pending does not notify the admins again.
 - Approve makes the user *active* and tells them, with the command list. Reject
   makes them *blocked*. A request can be decided only once.
-- Admins are the Telegram ids in `ADMIN_USER_IDS`. They are active without
-  approval as soon as they send `/start`, and only they can use the admin
-  commands and buttons.
+- Permanent admins are the Telegram ids in `ADMIN_USER_IDS`. They are active
+  without approval as soon as they send `/start`. They can make an active user an
+  admin with `/promote <id>` and take the role back with `/demote <id>`
+  (`users.role`); a permanent admin cannot be demoted, and a promoted admin
+  cannot promote or demote.
+- Admins, permanent or promoted, are the only ones who can use the admin commands
+  and the Approve/Reject buttons, and they receive access requests and failed-source
+  notices. A promoted admin gets the admin command list and menu at once, and loses
+  them when demoted or removed with `/removeuser` (which also clears the role).
 - Every command except `/start` and `/help` needs an active user; others are
   told they have no access yet and to send `/start`. A blocked user's `/start`
   gets no answer and sends no new request to the admins.
@@ -174,7 +180,9 @@ admin only receives access requests after sending `/start` once.
 ## 7. Commands
 
 The bot sets its Telegram command menu itself at every start: users see the user
-commands, and each admin's chat also lists the admin ones.
+commands, and each admin's chat also lists the admin ones (`/promote` and
+`/demote` only for permanent admins). A promotion or demotion updates that
+user's menu at once.
 
 ### 7.1 Users
 
@@ -196,8 +204,9 @@ commands, and each admin's chat also lists the admin ones.
 | `/checknow` | Runs a cycle now and replies with its status. |
 | `/addvendor <name>` | Section 7.4. |
 | `/removevendor <name>` | Disables the vendor and its sources; stored items are kept. Re-adding it with `/addvendor` enables it again. |
-| `/users` | Every user with status, name and id. |
+| `/users` | Every user with status, name and id; admins are marked "· admin". |
 | `/adduser <id>`, `/removeuser <id>` | Makes a user active (and tells them) or blocked. |
+| `/promote <id>`, `/demote <id>` | `ADMIN_USER_IDS` admins only. Gives an active user the admin role, or takes it back, and tells them. |
 
 ### 7.3 `/ask`
 

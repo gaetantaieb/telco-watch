@@ -52,6 +52,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("telco-watch")
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+# Permanent admins; others can be made admin with /promote (users.role).
 ADMINS = {int(x) for x in os.environ.get("ADMIN_USER_IDS", "").split(",") if x}
 MIN_CVSS = float(os.environ.get("MIN_CVSS", "7.0"))  # default /severity of a new user
 LEVELS = {"critical": 9.0, "high": 7.0, "medium": 4.0, "low": 0.0}
@@ -215,11 +216,39 @@ def decide_user(uid, status, admin_id):
 
 
 def set_user_status(uid, status, admin_id):
+    """A removed user also loses the admin role."""
     return db.q(
-        "UPDATE users SET status = %s, approved_by = %s WHERE chat_id = %s RETURNING name",
-        (status, admin_id, uid),
+        "UPDATE users SET status = %s, approved_by = %s, "
+        "role = CASE WHEN %s = 'active' THEN role ELSE 'user' END "
+        "WHERE chat_id = %s RETURNING name",
+        (status, admin_id, status, uid),
         one=True,
     )
+
+
+def set_role(uid, role):
+    """/promote and /demote; None unless the user is active."""
+    return db.q(
+        "UPDATE users SET role = %s WHERE chat_id = %s AND status = 'active' RETURNING name",
+        (role, uid),
+        one=True,
+    )
+
+
+def promoted_admins():
+    return db.q("SELECT chat_id FROM users WHERE role = 'admin' AND status = 'active'")
+
+
+def is_admin(uid, user=None):
+    """Permanent admins (ADMIN_USER_IDS) and active users promoted with /promote."""
+    if uid in ADMINS:
+        return True
+    user = user or get_user(uid)
+    return bool(user) and user["status"] == "active" and user.get("role") == "admin"
+
+
+def admin_ids():
+    return ADMINS | {r["chat_id"] for r in promoted_admins()}
 
 
 def set_min_cvss(uid, score):
@@ -308,7 +337,7 @@ async def cycle(context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(1.1)  # Telegram: about 1 message/s per chat
     if failed:
         for user in users:
-            if user["chat_id"] in ADMINS:
+            if is_admin(user["chat_id"], user):
                 await send(
                     context.bot,
                     user["chat_id"],
@@ -319,8 +348,19 @@ async def cycle(context: ContextTypes.DEFAULT_TYPE):
 # ---------- commands ----------
 def admin_only(fn):
     async def wrapper(u: Update, c: ContextTypes.DEFAULT_TYPE):
-        if u.effective_user.id not in ADMINS:
+        if not is_admin(u.effective_user.id):
             return await u.effective_message.reply_text("Admins only.")
+        return await fn(u, c)
+
+    return wrapper
+
+
+def permanent_admin_only(fn):
+    async def wrapper(u: Update, c: ContextTypes.DEFAULT_TYPE):
+        if u.effective_user.id not in ADMINS:
+            return await u.effective_message.reply_text(
+                "Only the permanent admins (ADMIN_USER_IDS) can do this."
+            )
         return await fn(u, c)
 
     return wrapper
@@ -352,10 +392,13 @@ ADMIN_HELP = (
     "\n\nAdmin: /checknow /addvendor /removevendor\n"
     "/users · /adduser <id> · /removeuser <id>: manage who can use the bot"
 )
+OWNER_HELP = "\n/promote <id> · /demote <id>: give or take back the admin role"
 
 
 def help_text(uid):
-    return HELP + (ADMIN_HELP if uid in ADMINS else "")
+    if uid in ADMINS:
+        return HELP + ADMIN_HELP + OWNER_HELP
+    return HELP + (ADMIN_HELP if is_admin(uid) else "")
 
 
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -382,7 +425,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
             ]
         ]
     )
-    for admin in ADMINS:
+    for admin in admin_ids():
         await send(
             c.bot, admin, f"Access request from {name} (id {uid}).", reply_markup=kb
         )
@@ -557,7 +600,7 @@ async def addvendor(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def on_button(u: Update, c: ContextTypes.DEFAULT_TYPE):
     qy = u.callback_query
-    if qy.from_user.id not in ADMINS:
+    if not is_admin(qy.from_user.id):
         return await qy.answer("Admins only.", show_alert=True)
     await qy.answer()
     action, pid = qy.data.split(":", 1)
@@ -694,8 +737,12 @@ async def unmute(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def users_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    rows = db.q("SELECT chat_id, name, status FROM users ORDER BY status, name")
-    lines = [f"{r['status']}: {r['name']} (id {r['chat_id']})" for r in rows]
+    rows = db.q("SELECT chat_id, name, status, role FROM users ORDER BY status, name")
+    lines = [
+        f"{r['status']}: {r['name']} (id {r['chat_id']})"
+        + (" · admin" if is_admin(r["chat_id"], r) else "")
+        for r in rows
+    ]
     await u.message.reply_text("\n".join(lines) or "No users yet.")
 
 
@@ -704,6 +751,7 @@ async def change_user(u: Update, c: ContextTypes.DEFAULT_TYPE, status):
     if not arg.isdigit():
         return await u.message.reply_text("Usage: give the user id shown by /users.")
     uid = int(arg)
+    promoted = uid not in ADMINS and is_admin(uid)
     if status == "active" and not get_user(uid):
         save_user(uid, None, "active")  # added before they ever wrote to the bot
         row = {"name": f"id {uid}"}
@@ -713,6 +761,8 @@ async def change_user(u: Update, c: ContextTypes.DEFAULT_TYPE, status):
         return await u.message.reply_text("Unknown user, see /users.")
     if status == "active":
         await send(c.bot, uid, "Your access was approved.\n\n" + help_text(uid))
+    elif promoted:
+        await set_chat_menu(c.bot, uid, None)  # removed: the admin role goes too
     await u.message.reply_text(
         f"{row['name'] or uid} {'can now use' if status == 'active' else 'can no longer use'} the bot."
     )
@@ -726,6 +776,41 @@ async def adduser(u: Update, c: ContextTypes.DEFAULT_TYPE):
 @admin_only
 async def removeuser(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await change_user(u, c, "blocked")
+
+
+async def change_role(u: Update, c: ContextTypes.DEFAULT_TYPE, admin):
+    arg = (c.args or [""])[0]
+    if not arg.isdigit():
+        return await u.message.reply_text("Usage: give the user id shown by /users.")
+    uid = int(arg)
+    if uid in ADMINS:
+        return await u.message.reply_text(
+            f"{uid} is a permanent admin (ADMIN_USER_IDS); change that variable instead."
+        )
+    row = set_role(uid, "admin" if admin else "user")
+    if not row:
+        return await u.message.reply_text("Unknown or inactive user, see /users.")
+    await set_chat_menu(c.bot, uid, ADMIN_MENU if admin else None)
+    await send(
+        c.bot,
+        uid,
+        "You are now an admin.\n\n" + help_text(uid)
+        if admin
+        else "You are no longer an admin.",
+    )
+    await u.message.reply_text(
+        f"{row['name'] or uid} {'is now' if admin else 'is no longer'} an admin."
+    )
+
+
+@permanent_admin_only
+async def promote(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    await change_role(u, c, True)
+
+
+@permanent_admin_only
+async def demote(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    await change_role(u, c, False)
 
 
 COMMANDS = {
@@ -745,6 +830,8 @@ COMMANDS = {
     "users": users_cmd,
     "adduser": adduser,
     "removeuser": removeuser,
+    "promote": promote,
+    "demote": demote,
 }
 
 # The Telegram command menu, set by the bot itself at start-up (no BotFather step).
@@ -768,19 +855,31 @@ ADMIN_MENU = MENU + [
     ("adduser", "Give a user access"),
     ("removeuser", "Remove a user's access"),
 ]
+OWNER_MENU = ADMIN_MENU + [  # permanent admins only
+    ("promote", "Make a user an admin"),
+    ("demote", "Take back a user's admin role"),
+]
+
+
+async def set_chat_menu(bot, chat_id, menu):
+    """One chat's own menu; None goes back to the user menu."""
+    scope = BotCommandScopeChat(chat_id)
+    try:
+        if menu is None:
+            await bot.delete_my_commands(scope=scope)
+        else:
+            await bot.set_my_commands([BotCommand(n, d) for n, d in menu], scope=scope)
+    except TelegramError as ex:  # e.g. this admin never wrote to the bot
+        log.warning("menu for %s not set: %s", chat_id, ex)
 
 
 async def set_menu(app):
     """Everyone sees the user commands; each admin's chat also lists the admin ones."""
     await app.bot.set_my_commands([BotCommand(n, d) for n, d in MENU])
-    for admin in ADMINS:
-        try:
-            await app.bot.set_my_commands(
-                [BotCommand(n, d) for n, d in ADMIN_MENU],
-                scope=BotCommandScopeChat(admin),
-            )
-        except TelegramError as ex:  # e.g. this admin never wrote to the bot
-            log.warning("admin menu for %s not set: %s", admin, ex)
+    for admin in sorted(admin_ids()):
+        await set_chat_menu(
+            app.bot, admin, OWNER_MENU if admin in ADMINS else ADMIN_MENU
+        )
 
 
 def main():

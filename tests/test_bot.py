@@ -465,9 +465,16 @@ def test_store_deduplicates(monkeypatch):
 class FakeBot:
     def __init__(self):
         self.sent = []
+        self.menus = {}  # chat id -> command names, None once deleted
 
     async def send_message(self, chat, text, **kw):
         self.sent.append((chat, text))
+
+    async def set_my_commands(self, commands, scope=None):
+        self.menus[scope and scope.chat_id] = [c.command for c in commands]
+
+    async def delete_my_commands(self, scope=None):
+        self.menus[scope.chat_id] = None
 
 
 def run_cycle(monkeypatch, fake_db, kev_items, nvd_error=None, users=None):
@@ -630,6 +637,8 @@ class FakeUsers:
             "save_user",
             "decide_user",
             "set_user_status",
+            "set_role",
+            "promoted_admins",
             "set_min_cvss",
             "set_muted",
             "find_vendor",
@@ -654,7 +663,23 @@ class FakeUsers:
         row = self.rows.get(uid)
         if row:
             row["status"] = status
+            if status != "active":
+                row["role"] = "user"
         return row
+
+    def set_role(self, uid, role):
+        row = self.rows.get(uid)
+        if not row or row["status"] != "active":
+            return None
+        row["role"] = role
+        return row
+
+    def promoted_admins(self):
+        return [
+            r
+            for r in self.rows.values()
+            if r.get("role") == "admin" and r["status"] == "active"
+        ]
 
     def set_min_cvss(self, uid, score):
         self.rows[uid]["min_cvss"] = score
@@ -776,6 +801,7 @@ def test_admins_add_and_remove_users(monkeypatch):
 
 def test_admin_commands_refuse_non_admins(monkeypatch):
     monkeypatch.setattr(bot, "ADMINS", {42})
+    FakeUsers(monkeypatch, user(chat_id=7))
     for cmd in (bot.checknow, bot.addvendor, bot.removevendor):
         u = update(7)
         run(cmd(u, SimpleNamespace(args=["Zyxel"])))
@@ -784,6 +810,7 @@ def test_admin_commands_refuse_non_admins(monkeypatch):
 
 def test_approve_button_refuses_non_admins(monkeypatch):
     monkeypatch.setattr(bot, "ADMINS", {42})
+    FakeUsers(monkeypatch)
     answers = []
 
     async def answer(text=None, show_alert=False):
@@ -977,15 +1004,18 @@ def test_latest_with_a_vendor_still_works(monkeypatch):
 
 
 def test_menu_lists_real_commands_and_admin_ones_only_for_admins():
-    names = [n for n, _ in bot.ADMIN_MENU]
+    names = [n for n, _ in bot.OWNER_MENU]
     assert set(names) <= set(bot.COMMANDS) and len(names) == len(set(names))
     assert set(bot.COMMANDS) - set(names) == {"health"}  # alias, kept out of the menu
     user_menu = {n for n, _ in bot.MENU}
     assert {"checknow", "addvendor", "users"}.isdisjoint(user_menu)
+    admin_menu = {n for n, _ in bot.ADMIN_MENU}
+    assert "users" in admin_menu and {"promote", "demote"}.isdisjoint(admin_menu)
 
 
 def test_set_menu_sets_the_admin_menu_per_admin_chat(monkeypatch):
     monkeypatch.setattr(bot, "ADMINS", {42, 43})
+    FakeUsers(monkeypatch, user(chat_id=44, role="admin"), user(chat_id=45))
     calls = []
 
     async def set_my_commands(commands, scope=None):
@@ -996,8 +1026,96 @@ def test_set_menu_sets_the_admin_menu_per_admin_chat(monkeypatch):
     app = SimpleNamespace(bot=SimpleNamespace(set_my_commands=set_my_commands))
     run(bot.set_menu(app))  # one admin failing does not stop the others
     assert calls[0] == ([n for n, _ in bot.MENU], None)
-    assert calls[1] == ([n for n, _ in bot.ADMIN_MENU], 42)
-    assert len(calls) == 2
+    assert calls[1] == ([n for n, _ in bot.OWNER_MENU], 42)  # permanent admin
+    assert calls[2] == ([n for n, _ in bot.ADMIN_MENU], 44)  # promoted admin
+    assert len(calls) == 3
+
+
+def test_permanent_admins_promote_and_demote(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {42})
+    users = FakeUsers(
+        monkeypatch, user(chat_id=7, name="Bob"), user(chat_id=8, status="pending")
+    )
+    c = ctx(["7"])
+    run(bot.promote(update(42), c))
+    assert users.rows[7]["role"] == "admin"
+    assert c.bot.menus[7] == [n for n, _ in bot.ADMIN_MENU]
+    assert c.bot.sent[0][0] == 7 and c.bot.sent[0][1].startswith("You are now an admin")
+    assert "/checknow" in c.bot.sent[0][1] and "/promote" not in c.bot.sent[0][1]
+    # A promoted admin has the admin commands and buttons...
+    assert bot.is_admin(7) and 7 in bot.admin_ids()
+    assert "/promote" in bot.help_text(42) and "/promote" not in bot.help_text(7)
+    # ...but cannot promote or demote.
+    for cmd in (bot.promote, bot.demote):
+        u = update(7)
+        run(cmd(u, ctx(["8"])))
+        assert u.message.replies == [
+            "Only the permanent admins (ADMIN_USER_IDS) can do this."
+        ]
+    c = ctx(["7"])
+    run(bot.demote(update(42), c))
+    assert users.rows[7]["role"] == "user" and not bot.is_admin(7)
+    assert c.bot.menus[7] is None and c.bot.sent[0] == (
+        7,
+        "You are no longer an admin.",
+    )
+
+
+def test_promote_refuses_unknown_inactive_and_permanent_admins(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {42})
+    users = FakeUsers(monkeypatch, user(chat_id=8, status="pending"))
+    for arg, reply in (
+        ("8", "Unknown or inactive user, see /users."),
+        ("9", "Unknown or inactive user, see /users."),
+        (
+            "42",
+            "42 is a permanent admin (ADMIN_USER_IDS); change that variable instead.",
+        ),
+        ("bob", "Usage: give the user id shown by /users."),
+    ):
+        u = update(42)
+        run(bot.demote(u, ctx([arg])) if arg == "42" else bot.promote(u, ctx([arg])))
+        assert u.message.replies == [reply]
+    assert "role" not in users.rows[8]
+
+
+def test_promoted_admins_get_requests_and_failure_notices(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {42})
+    FakeUsers(monkeypatch, user(chat_id=7, role="admin"))
+    c = ctx()
+    run(bot.start(update(9, "Eve"), c))
+    assert sorted(chat for chat, _ in c.bot.sent) == [7, 42]
+    fake_db = FakeDB({"last_run": "2026-10-22T08:00:00+00:00"})
+    users = [user(chat_id=7, role="admin"), user(chat_id=8)]
+    sent = run_cycle(monkeypatch, fake_db, [], nvd_error=RuntimeError("x"), users=users)
+    assert [chat for chat, text in sent if "Sources failed" in text] == [7]
+
+
+def test_removing_a_promoted_admin_takes_the_role_and_menu(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {42})
+    users = FakeUsers(monkeypatch, user(chat_id=7, role="admin"), user(chat_id=8))
+    c = ctx(["7"])
+    run(bot.removeuser(update(42), c))
+    assert users.rows[7]["role"] == "user" and c.bot.menus == {7: None}
+    c = ctx(["8"])
+    run(bot.removeuser(update(42), c))
+    assert c.bot.menus == {}  # not an admin: the menu is left alone
+
+
+def test_users_marks_admins(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {42})
+    FakeUsers(monkeypatch)
+    rows = [
+        {"chat_id": 42, "name": "Ann", "status": "active", "role": "user"},
+        {"chat_id": 7, "name": "Bob", "status": "active", "role": "admin"},
+        {"chat_id": 8, "name": "Cy", "status": "active", "role": "user"},
+    ]
+    monkeypatch.setattr(bot.db, "q", lambda sql, params=(), one=False: rows)
+    u = update(42)
+    run(bot.users_cmd(u, ctx()))
+    assert u.message.replies == [
+        "active: Ann (id 42) · admin\nactive: Bob (id 7) · admin\nactive: Cy (id 8)"
+    ]
 
 
 class FakePoolConn:
