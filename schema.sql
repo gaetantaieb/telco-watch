@@ -45,3 +45,17 @@ CREATE TABLE IF NOT EXISTS users (                   -- people using the bot in 
 -- A product or technology (e.g. PHP) is matched in NVD by its CPE instead of a keyword,
 -- so CVEs that only mention it ("a PHP application...") are not collected.
 ALTER TABLE vendors ADD COLUMN IF NOT EXISTS nvd_cpe TEXT;     -- e.g. cpe:2.3:a:php:php
+
+-- Parsed dates: lists sort by publication, and an old advisory that a source has just
+-- changed (NVD re-analysis) is told apart from a new one. Backfilled at start-up.
+ALTER TABLE items ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ; -- else seen_at
+ALTER TABLE items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;   -- if the source gives it
+CREATE INDEX IF NOT EXISTS items_published_at ON items (published_at DESC);
+
+-- The vendor's own rating (critical, high, medium, low) when the advisory has no CVSS
+-- score; it is placed in the severity matrix at the lowest score of its level.
+ALTER TABLE items ADD COLUMN IF NOT EXISTS rating TEXT;
+
+-- /promote: admins besides the permanent ones of ADMIN_USER_IDS.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'
+    CHECK (role IN ('user', 'admin'));

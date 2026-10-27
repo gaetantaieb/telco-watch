@@ -81,6 +81,54 @@ def test_cves_are_extracted():
     assert it["cves"] == ["CVE-2026-12345"]
 
 
+LONG = (
+    "A vulnerability in the web-based management interface of Cisco IOS XR Software "
+    "could allow an unauthenticated, remote attacker to execute arbitrary commands. "
+    "This vulnerability is due to insufficient validation of user-supplied input."
+)
+
+
+def test_short_title_keeps_what_fits_and_summarises_the_rest():
+    assert collectors.short_title("IOS XR flaw.  Fixed.") == "IOS XR flaw. Fixed."
+    assert collectors.short_title(LONG) == LONG.split(". ")[0] + "."
+    cut = collectors.short_title(LONG, 60)
+    assert len(cut) <= 60 and cut.endswith("…") and LONG.startswith(cut[:-1])
+    assert not cut[:-1].endswith(" ")
+    assert collectors.short_title("x" * 300, 50) == "x" * 49 + "…"  # no space at all
+    assert collectors.short_title(None) == ""
+
+
+@pytest.mark.parametrize(
+    "text, cvss, rating",
+    [
+        ("CVSS v3.1 Base Score: 9.8", 9.8, None),
+        ("CVSSv3 Score: 7.5", 7.5, None),
+        ("CVSS: 8.1 (High)", 8.1, None),
+        ('{"cvss_score": 10.0}', 10.0, None),
+        ("CVSS:3.1/AV:N/AC:L/PR:N", None, None),  # a vector, not a score
+        ("PAN-OS: DoS in DNS proxy (Severity: HIGH)", None, "high"),  # Palo Alto
+        ("Security Impact Rating: Critical", None, "critical"),  # Cisco
+        ('{"severity": "moderate"}', None, "medium"),  # JSON text
+        ("Important severity update", None, "high"),
+        ("A low-severity issue", None, "low"),
+        ("Highly available routers", None, None),
+        ("FortiOS heap overflow", None, None),
+    ],
+)
+def test_vendor_scores_and_ratings_are_read_from_the_text(text, cvss, rating):
+    it = collectors.item("X", "1", "t", "u", text)
+    assert (it["cvss"], it["rating"]) == (cvss, rating)
+
+
+def test_a_given_score_wins_over_the_text():
+    it = collectors.item("X", "1", "Severity: Low", "u", cvss=9.1)
+    assert (it["cvss"], it["rating"]) == (9.1, None)
+    assert collectors.item("X", "1", "Severity: Low", "u", rating="HIGH")["rating"] == (
+        "high"
+    )
+    assert collectors.item("X", "1", "t", "u", rating="n/a")["rating"] is None
+
+
 def test_unsafe_urls_are_refused():
     assert not collectors.safe_url("http://example.com/feed")  # not https
     assert not collectors.safe_url("https://postgres.railway.internal")  # internal host
@@ -106,6 +154,24 @@ def test_unscored_advisories_are_sent():
     assert bot.severity(item()) == "🔵 ADVISORY"
     assert bot.wants(user(), item())
     assert bot.wants(user(), item(kev=True, cvss=2.0))
+
+
+@pytest.mark.parametrize(
+    "rating, label, sent_at_high",
+    [
+        ("critical", "🔴 CRITICAL", True),
+        ("high", "🟠 HIGH", True),
+        ("medium", "🟡 MEDIUM", False),
+        ("low", "⚪ LOW", False),
+    ],
+)
+def test_vendor_ratings_use_the_severity_matrix(rating, label, sent_at_high):
+    it = item(rating=rating)
+    assert bot.severity(it) == label
+    assert bot.wants(user(), it) is sent_at_high  # /severity high
+    assert bot.wants(user(min_cvss=0.0), it)
+    assert f"<b>{label} · vendor rating</b>" in bot.fmt(it)
+    assert bot.wants(user(), item(rating="low", kev=True))  # KEV is always sent
 
 
 def test_muted_vendors_are_not_sent():
@@ -190,6 +256,20 @@ def test_fetch_rss():
     assert it["url"] == "https://vendor.example/a1"
     assert it["cves"] == ["CVE-2026-11111", "CVE-2026-22222"]
     assert "2026" in it["published"]
+    assert it["updated"] == ""  # an RSS item without an update date gets none
+
+
+def test_fetch_atom_reads_the_update_date():
+    atom = (
+        '<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>a</id><title>t</title>'
+        "<published>2026-10-01T09:00:00Z</published>"
+        "<updated>2026-10-23T09:00:00Z</updated></entry></feed>"
+    )
+    client = mock_client(lambda r: httpx.Response(200, text=atom))
+    src = {"vendor": "X", "type": "rss", "url": "https://x.example/", "config": {}}
+    [it] = run(collectors.fetch_rss(client, src))
+    assert it["published"].startswith("2026-10-01")
+    assert it["updated"].startswith("2026-10-23")
 
 
 def test_fetch_json():
@@ -211,6 +291,15 @@ def test_fetch_json():
         it["url"] == "https://vendor.example/api"
     )  # no url field: falls back to the source
     assert it["cves"] == ["CVE-2026-3333"]
+
+
+def test_fetch_json_reads_the_severity_field():
+    payload = [{"ghsa_id": "GHSA-1", "summary": "Heap overflow", "level": "Moderate"}]
+    client = mock_client(lambda r: httpx.Response(200, json=payload))
+    cfg = {"id": "ghsa_id", "title": "summary", "severity": "level"}
+    src = {"vendor": "PHP", "type": "json", "url": "https://x.example/", "config": cfg}
+    [it] = run(collectors.fetch_json(client, src))
+    assert (it["cvss"], it["rating"]) == (None, "medium")
 
 
 HTML = """<table>
@@ -320,6 +409,7 @@ def test_fetch_nvd_reads_best_cvss_and_queries_since(monkeypatch):
                 "cve": {
                     "id": "CVE-2026-5555",
                     "published": "2026-10-22T09:14:00.000",
+                    "lastModified": "2026-10-23T07:00:00.000",
                     "descriptions": [{"lang": "en", "value": "Cisco IOS XR flaw"}],
                     "metrics": {"cvssMetricV31": [{"cvssData": {"baseScore": 9.8}}]},
                 }
@@ -335,6 +425,7 @@ def test_fetch_nvd_reads_best_cvss_and_queries_since(monkeypatch):
     out = run(collectors.fetch_nvd(mock_client(handler), VENDORS[:1], since))
     assert [it["cvss"] for it in out] == [9.8]
     assert out[0]["title"] == "Cisco IOS XR flaw"
+    assert out[0]["updated"] == "2026-10-23T07:00:00.000"
     assert seen[0]["keywordSearch"] == "Cisco"
     assert seen[0]["lastModStartDate"].startswith("2026-10-22T08:00:00.000")
 
@@ -374,9 +465,16 @@ def test_store_deduplicates(monkeypatch):
 class FakeBot:
     def __init__(self):
         self.sent = []
+        self.menus = {}  # chat id -> command names, None once deleted
 
     async def send_message(self, chat, text, **kw):
         self.sent.append((chat, text))
+
+    async def set_my_commands(self, commands, scope=None):
+        self.menus[scope and scope.chat_id] = [c.command for c in commands]
+
+    async def delete_my_commands(self, scope=None):
+        self.menus[scope.chat_id] = None
 
 
 def run_cycle(monkeypatch, fake_db, kev_items, nvd_error=None, users=None):
@@ -434,6 +532,70 @@ def test_new_items_are_sent_once_and_failures_reported(monkeypatch):
     assert run_cycle(monkeypatch, fake_db, items, users=users) == []
 
 
+def test_old_advisories_changed_by_their_source_are_one_line_updates(monkeypatch):
+    fake_db = FakeDB({"last_run": (datetime.now(UTC) - timedelta(hours=1)).isoformat()})
+    items = [
+        item(id="new", cvss=9.8, title="Fresh flaw", published=ago(0.1)),
+        item(
+            id="old",
+            cvss=9.8,
+            cves=["CVE-2019-1"],
+            title=LONG,
+            published="2019-03-12T10:00:00.000",
+            updated="2026-01-15T09:14:00.000",
+        ),
+    ]
+    sent = [text for _, text in run_cycle(monkeypatch, fake_db, items, users=[user()])]
+    assert sent[0].startswith("<b>🔴 CRITICAL") and "Fresh flaw" in sent[0]
+    line, url = sent[1].split("\n")
+    assert line.startswith(
+        "🔄 <b>Update</b> · 🔴 CRITICAL · CVSS 9.8 · Cisco · CVE-2019-1"
+    )
+    assert "published 12-03-2019 11:00 CET" in line
+    assert line.endswith("· last updated 15-01-2026 10:14 CET") and url == "u"
+
+
+def test_update_lines_still_follow_the_user_settings(monkeypatch):
+    fake_db = FakeDB({"last_run": (datetime.now(UTC) - timedelta(hours=1)).isoformat()})
+    old = [item(id="o", cvss=5.0, published="2019-03-12")]
+    assert run_cycle(monkeypatch, fake_db, old, users=[user()]) == []  # below /severity
+
+
+def test_store_keeps_the_parsed_dates(monkeypatch):
+    calls = []
+
+    def q(sql, params=(), one=False):
+        calls.append(params)
+        return {"key": params[0]}
+
+    monkeypatch.setattr(bot, "db", SimpleNamespace(q=q))
+    it = item(published="Thu, 22 Oct 2026 09:14:00 GMT", updated="2026-10-23")
+    bot.store(it)
+    assert calls[0][-2:] == (
+        datetime(2026, 10, 22, 9, 14, tzinfo=UTC),
+        datetime(2026, 10, 23, tzinfo=UTC),
+    )
+    bot.store(item(published="soon"))  # no date: collection time, no update date
+    assert calls[1][-1] is None and calls[1][-2] > datetime.now(UTC) - timedelta(1)
+
+
+def test_backfill_parses_the_dates_of_older_rows(monkeypatch):
+    seen = datetime(2026, 10, 1, tzinfo=UTC)
+    rows = [{"key": "a", "published": "2026-09-30", "seen_at": seen}]
+    rows.append({"key": "b", "published": "", "seen_at": seen})
+    updates = []
+
+    def q(sql, params=(), one=False):
+        if sql.startswith("SELECT"):
+            assert "published_at IS NULL" in sql
+            return rows
+        updates.append(params)
+
+    monkeypatch.setattr(bot, "db", SimpleNamespace(q=q))
+    bot.backfill_dates()
+    assert updates == [(datetime(2026, 9, 30, tzinfo=UTC), "a"), (seen, "b")]
+
+
 def test_a_user_who_blocked_the_bot_does_not_stop_the_others():
     class Bot(FakeBot):
         async def send_message(self, chat, text, **kw):
@@ -475,6 +637,8 @@ class FakeUsers:
             "save_user",
             "decide_user",
             "set_user_status",
+            "set_role",
+            "promoted_admins",
             "set_min_cvss",
             "set_muted",
             "find_vendor",
@@ -499,7 +663,23 @@ class FakeUsers:
         row = self.rows.get(uid)
         if row:
             row["status"] = status
+            if status != "active":
+                row["role"] = "user"
         return row
+
+    def set_role(self, uid, role):
+        row = self.rows.get(uid)
+        if not row or row["status"] != "active":
+            return None
+        row["role"] = role
+        return row
+
+    def promoted_admins(self):
+        return [
+            r
+            for r in self.rows.values()
+            if r.get("role") == "admin" and r["status"] == "active"
+        ]
 
     def set_min_cvss(self, uid, score):
         self.rows[uid]["min_cvss"] = score
@@ -621,6 +801,7 @@ def test_admins_add_and_remove_users(monkeypatch):
 
 def test_admin_commands_refuse_non_admins(monkeypatch):
     monkeypatch.setattr(bot, "ADMINS", {42})
+    FakeUsers(monkeypatch, user(chat_id=7))
     for cmd in (bot.checknow, bot.addvendor, bot.removevendor):
         u = update(7)
         run(cmd(u, SimpleNamespace(args=["Zyxel"])))
@@ -629,6 +810,7 @@ def test_admin_commands_refuse_non_admins(monkeypatch):
 
 def test_approve_button_refuses_non_admins(monkeypatch):
     monkeypatch.setattr(bot, "ADMINS", {42})
+    FakeUsers(monkeypatch)
     answers = []
 
     async def answer(text=None, show_alert=False):
@@ -685,8 +867,38 @@ def test_published_at_reads_every_source_format(published, expected):
     assert bot.published_at(it) == expected
 
 
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("2026-01-15T09:14:00.000", "15-01-2026 10:14 CET"),  # NVD, UTC, winter
+        ("Thu, 22 Oct 2026 09:14:00 GMT", "22-10-2026 11:14 CEST"),  # RSS, summer
+        ("2026-10-22T09:14:00-07:00", "22-10-2026 18:14 CEST"),  # any offset
+        (datetime(2026, 10, 27, 8, 5, tzinfo=UTC), "27-10-2026 09:05 CET"),
+        ("2026-10-20", "20-10-2026"),  # KEV: a date without a time stays a date
+        ("next week", "next week"),  # unreadable: shown as given
+        ("", ""),
+    ],
+)
+def test_dates_are_shown_in_paris_time(value, expected):
+    assert bot.when(value) == expected
+
+
+def test_alerts_and_status_use_paris_time(monkeypatch):
+    assert "<b>Published:</b> 20-10-2026\n" in bot.fmt(item(published="2026-10-20"))
+    fake_db = FakeDB({"last_run": "2026-10-22T08:00:00+00:00"})
+    run_cycle(monkeypatch, fake_db, [])
+    assert fake_db.state["last_status"].split(" · ")[0].endswith(("CET", "CEST"))
+
+
 def ago(days):
     return (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+
+def stored(**kw):
+    """An item as read back from the database, with its parsed publication date."""
+    it = item(**kw)
+    it["published_at"] = bot.published_at(it)
+    return it
 
 
 def run_latest_all(monkeypatch, rows, args):
@@ -706,9 +918,9 @@ def run_latest_all(monkeypatch, rows, args):
 def test_latest_all_lists_high_and_above_by_publication_date(monkeypatch):
     now = datetime.now(UTC)
     rows = [
-        item(id="a", vendor="Nokia", cvss=7.5, published=ago(2), seen_at=now),
-        item(id="b", vendor="Cisco", cvss=9.8, published=ago(1), seen_at=now),
-        item(
+        stored(id="a", vendor="Nokia", cvss=7.5, published=ago(2), seen_at=now),
+        stored(id="b", vendor="Cisco", cvss=9.8, published=ago(1), seen_at=now),
+        stored(
             id="c",
             vendor="ZTE",
             kev=True,
@@ -717,10 +929,14 @@ def test_latest_all_lists_high_and_above_by_publication_date(monkeypatch):
             published=ago(3),
             seen_at=now,
         ),
-        item(
-            id="old", vendor="Huawei", kev=True, published="2021-05-01", seen_at=now
-        ),  # backlog
-        item(
+        stored(
+            id="pan",
+            vendor="Palo Alto Networks",
+            rating="critical",
+            published=ago(1),
+            seen_at=now,
+        ),
+        stored(
             id="adv",
             vendor="Fortinet",
             title="FortiOS advisory",
@@ -731,12 +947,15 @@ def test_latest_all_lists_high_and_above_by_publication_date(monkeypatch):
     replies, calls = run_latest_all(monkeypatch, rows, ["all", "5"])
     sql, params = calls[0]
     assert "kev OR cvss >= %s" in sql and params == (7.0, 5)
+    assert "published_at >= now()" in sql  # an old item stored today is left out
     text = "\n\n".join(replies)
-    assert text.startswith("High and above, all vendors, last 5 days: 3")
-    # KEV first, then by score; the 2021 KEV entry stored today is left out.
-    assert text.index("ZTE") < text.index("Cisco") < text.index("Nokia")
-    assert "Huawei" not in text
-    assert "without a CVSS score: 1" in text and "FortiOS advisory" in text
+    assert text.startswith("High and above, all vendors, last 5 days: 4")
+    assert "rating IN ('critical', 'high')" in sql
+    # KEV first, then by score; a vendor's critical rating counts as 9.0.
+    assert text.index("ZTE") < text.index("Cisco") < text.index("Palo Alto")
+    assert text.index("Palo Alto") < text.index("Nokia")
+    assert "🔴 CRITICAL · vendor rating · Palo Alto Networks" in text
+    assert "without a score or rating: 1" in text and "FortiOS advisory" in text
 
 
 def test_latest_all_defaults_to_7_days_and_caps_at_90(monkeypatch):
@@ -750,7 +969,7 @@ def test_latest_all_defaults_to_7_days_and_caps_at_90(monkeypatch):
 def test_latest_all_splits_long_lists_and_caps_them(monkeypatch):
     now = datetime.now(UTC)
     rows = [
-        item(
+        stored(
             id=str(i),
             cvss=9.0,
             title="x" * 100,
@@ -772,21 +991,31 @@ def test_brief_names_the_cves_or_nothing():
     assert bot.brief(item()).startswith("🔵 ADVISORY · Cisco\n")
 
 
+def test_brief_shortens_long_titles_at_a_word():
+    title = bot.brief(item(title=LONG)).split("\n")[1]
+    assert len(title) <= 120 and title.endswith("…")
+    assert LONG.startswith(title[:-1]) and LONG[len(title) - 1] == " "  # whole words
+
+
 def test_latest_with_a_vendor_still_works(monkeypatch):
     _, calls = run_latest_all(monkeypatch, [], ["Cisco", "3"])
     assert "vendor ILIKE" in calls[0][0] and calls[0][1] == ["%Cisco%", 3]
+    assert "ORDER BY published_at DESC" in calls[0][0]  # not by collection time
 
 
 def test_menu_lists_real_commands_and_admin_ones_only_for_admins():
-    names = [n for n, _ in bot.ADMIN_MENU]
+    names = [n for n, _ in bot.OWNER_MENU]
     assert set(names) <= set(bot.COMMANDS) and len(names) == len(set(names))
     assert set(bot.COMMANDS) - set(names) == {"health"}  # alias, kept out of the menu
     user_menu = {n for n, _ in bot.MENU}
     assert {"checknow", "addvendor", "users"}.isdisjoint(user_menu)
+    admin_menu = {n for n, _ in bot.ADMIN_MENU}
+    assert "users" in admin_menu and {"promote", "demote"}.isdisjoint(admin_menu)
 
 
 def test_set_menu_sets_the_admin_menu_per_admin_chat(monkeypatch):
     monkeypatch.setattr(bot, "ADMINS", {42, 43})
+    FakeUsers(monkeypatch, user(chat_id=44, role="admin"), user(chat_id=45))
     calls = []
 
     async def set_my_commands(commands, scope=None):
@@ -797,8 +1026,96 @@ def test_set_menu_sets_the_admin_menu_per_admin_chat(monkeypatch):
     app = SimpleNamespace(bot=SimpleNamespace(set_my_commands=set_my_commands))
     run(bot.set_menu(app))  # one admin failing does not stop the others
     assert calls[0] == ([n for n, _ in bot.MENU], None)
-    assert calls[1] == ([n for n, _ in bot.ADMIN_MENU], 42)
-    assert len(calls) == 2
+    assert calls[1] == ([n for n, _ in bot.OWNER_MENU], 42)  # permanent admin
+    assert calls[2] == ([n for n, _ in bot.ADMIN_MENU], 44)  # promoted admin
+    assert len(calls) == 3
+
+
+def test_permanent_admins_promote_and_demote(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {42})
+    users = FakeUsers(
+        monkeypatch, user(chat_id=7, name="Bob"), user(chat_id=8, status="pending")
+    )
+    c = ctx(["7"])
+    run(bot.promote(update(42), c))
+    assert users.rows[7]["role"] == "admin"
+    assert c.bot.menus[7] == [n for n, _ in bot.ADMIN_MENU]
+    assert c.bot.sent[0][0] == 7 and c.bot.sent[0][1].startswith("You are now an admin")
+    assert "/checknow" in c.bot.sent[0][1] and "/promote" not in c.bot.sent[0][1]
+    # A promoted admin has the admin commands and buttons...
+    assert bot.is_admin(7) and 7 in bot.admin_ids()
+    assert "/promote" in bot.help_text(42) and "/promote" not in bot.help_text(7)
+    # ...but cannot promote or demote.
+    for cmd in (bot.promote, bot.demote):
+        u = update(7)
+        run(cmd(u, ctx(["8"])))
+        assert u.message.replies == [
+            "Only the permanent admins (ADMIN_USER_IDS) can do this."
+        ]
+    c = ctx(["7"])
+    run(bot.demote(update(42), c))
+    assert users.rows[7]["role"] == "user" and not bot.is_admin(7)
+    assert c.bot.menus[7] is None and c.bot.sent[0] == (
+        7,
+        "You are no longer an admin.",
+    )
+
+
+def test_promote_refuses_unknown_inactive_and_permanent_admins(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {42})
+    users = FakeUsers(monkeypatch, user(chat_id=8, status="pending"))
+    for arg, reply in (
+        ("8", "Unknown or inactive user, see /users."),
+        ("9", "Unknown or inactive user, see /users."),
+        (
+            "42",
+            "42 is a permanent admin (ADMIN_USER_IDS); change that variable instead.",
+        ),
+        ("bob", "Usage: give the user id shown by /users."),
+    ):
+        u = update(42)
+        run(bot.demote(u, ctx([arg])) if arg == "42" else bot.promote(u, ctx([arg])))
+        assert u.message.replies == [reply]
+    assert "role" not in users.rows[8]
+
+
+def test_promoted_admins_get_requests_and_failure_notices(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {42})
+    FakeUsers(monkeypatch, user(chat_id=7, role="admin"))
+    c = ctx()
+    run(bot.start(update(9, "Eve"), c))
+    assert sorted(chat for chat, _ in c.bot.sent) == [7, 42]
+    fake_db = FakeDB({"last_run": "2026-10-22T08:00:00+00:00"})
+    users = [user(chat_id=7, role="admin"), user(chat_id=8)]
+    sent = run_cycle(monkeypatch, fake_db, [], nvd_error=RuntimeError("x"), users=users)
+    assert [chat for chat, text in sent if "Sources failed" in text] == [7]
+
+
+def test_removing_a_promoted_admin_takes_the_role_and_menu(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {42})
+    users = FakeUsers(monkeypatch, user(chat_id=7, role="admin"), user(chat_id=8))
+    c = ctx(["7"])
+    run(bot.removeuser(update(42), c))
+    assert users.rows[7]["role"] == "user" and c.bot.menus == {7: None}
+    c = ctx(["8"])
+    run(bot.removeuser(update(42), c))
+    assert c.bot.menus == {}  # not an admin: the menu is left alone
+
+
+def test_users_marks_admins(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {42})
+    FakeUsers(monkeypatch)
+    rows = [
+        {"chat_id": 42, "name": "Ann", "status": "active", "role": "user"},
+        {"chat_id": 7, "name": "Bob", "status": "active", "role": "admin"},
+        {"chat_id": 8, "name": "Cy", "status": "active", "role": "user"},
+    ]
+    monkeypatch.setattr(bot.db, "q", lambda sql, params=(), one=False: rows)
+    u = update(42)
+    run(bot.users_cmd(u, ctx()))
+    assert u.message.replies == [
+        "active: Ann (id 42) · admin\nactive: Bob (id 7) · admin\nactive: Cy (id 8)"
+    ]
 
 
 class FakePoolConn:
@@ -892,6 +1209,14 @@ def test_alert_stats_groups(monkeypatch):
     llm.alert_stats("severity")
     assert calls[0][0].startswith("SELECT vendor AS grp") and calls[0][1] == [168]
     assert "CASE WHEN" in calls[1][0] and calls[1][1] == []
+
+
+def test_ask_counts_vendor_ratings_in_their_level(monkeypatch):
+    calls = []
+    monkeypatch.setattr(llm.db, "q_ro", lambda sql, p=(): calls.append((sql, p)) or [])
+    llm.search_alerts(min_cvss=7)
+    assert "COALESCE(cvss, CASE rating WHEN 'critical' THEN 9" in calls[0][0]
+    assert "rating" in llm.COLS and "rating" in llm.SEV
 
 
 def test_tools_match_functions():

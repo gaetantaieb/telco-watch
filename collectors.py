@@ -5,6 +5,7 @@ import os
 import re
 import socket
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlparse
 
 import feedparser
@@ -16,10 +17,48 @@ UA = {"User-Agent": "telco-watch-bot/1.0"}
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 NVD_KEY = os.environ.get("NVD_API_KEY")
+# The vendor's own rating, read from the advisory text when the source gives no score:
+# "CVSS v3.1 Base Score: 9.8", "(Severity: HIGH)", "Security Impact Rating: Critical".
+# A vector string ("CVSS:3.1/AV:N/...") is not a score.
+CVSS_RE = re.compile(
+    r"CVSS(?:\s?v?[234](?:\.\d)?)?[\s\"':=_]*(?:base\s*)?(?:score)?[\s\"':=]*"
+    r"(10(?:\.0)?|\d\.\d)(?![\d/.])",
+    re.IGNORECASE,
+)
+LEVEL_WORDS = r"(critical|high|important|medium|moderate|low)"
+RATING_RE = re.compile(
+    rf"(?:severity|impact rating|\bSIR)[\s\"':=(]*{LEVEL_WORDS}\b"
+    rf"|\b{LEVEL_WORDS}[\s-]+severity\b",  # "High severity" or "high-severity"
+    re.IGNORECASE,
+)
+RATINGS = {"important": "high", "moderate": "medium"}  # other words are already levels
 
 
-def item(vendor, ident, title, url, text="", cvss=None, kev=False, published=""):
+def rating_of(value):
+    """A vendor rating word as one of the severity levels, or None."""
+    word = str(value or "").strip().lower()
+    word = RATINGS.get(word, word)
+    return word if word in ("critical", "high", "medium", "low") else None
+
+
+def item(
+    vendor,
+    ident,
+    title,
+    url,
+    text="",
+    cvss=None,
+    kev=False,
+    published="",
+    updated="",
+    rating=None,
+):
     title = (title or "").strip()
+    if cvss is None and (m := CVSS_RE.search(f"{title} {text}")):
+        cvss = float(m.group(1))
+    if cvss is None and not rating_of(rating):
+        m = RATING_RE.search(f"{title} {text}")
+        rating = m and (m.group(1) or m.group(2))
     return {
         "vendor": vendor,
         "id": str(ident),
@@ -29,7 +68,35 @@ def item(vendor, ident, title, url, text="", cvss=None, kev=False, published="")
         "cvss": cvss,
         "kev": kev,
         "published": str(published or ""),
+        "updated": str(updated or ""),  # the source's last change, when it gives one
+        "rating": None if cvss is not None else rating_of(rating),
     }
+
+
+def parse_date(raw):
+    """A source's date (ISO 8601 or RFC 2822) as an aware datetime, or None if unreadable."""
+    raw = str(raw or "").strip()
+    for parse in (datetime.fromisoformat, parsedate_to_datetime):
+        try:
+            dt = parse(raw)
+        except (TypeError, ValueError, IndexError):
+            continue
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    return None
+
+
+def short_title(text, limit=200):
+    """Text that fits is kept; else its first sentence, cut at a word when still too long."""
+    text = " ".join((text or "").split())
+    if len(text) <= limit:
+        return text
+    first = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
+    if 40 <= len(first) <= limit:  # a very short "sentence" is likely an abbreviation
+        return first
+    cut = text[: limit - 1]
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut.rstrip(" ,;:-") + "…"
 
 
 def safe_url(url):
@@ -69,13 +136,16 @@ async def fetch_rss(client, src):
             e.get("link", ""),
             e.get("summary", ""),
             published=e.get("published"),
+            # e.get("updated") would warn, then fall back to the published date
+            updated=dict.get(e, "updated"),
         )
         for e in feedparser.parse(r.text).entries
     ]
 
 
 async def fetch_json(client, src):
-    cfg = src["config"]  # {"list": "a.b", "id": .., "title": .., "url": .., "date": ..}
+    # config: {"list": "a.b", "id", "title", "url", "date", "updated", "severity"}
+    cfg = src["config"]
     r = await client.get(src["url"])
     r.raise_for_status()
     data = r.json()
@@ -89,6 +159,8 @@ async def fetch_json(client, src):
             str(d.get(cfg.get("url", ""), src["url"])),
             json.dumps(d)[:2000],
             published=d.get(cfg.get("date", "")),
+            updated=d.get(cfg.get("updated", "")),
+            rating=d.get(cfg.get("severity", "")),
         )
         for d in data[:100]
     ]
@@ -182,11 +254,12 @@ async def fetch_nvd(client, vendors, since):
                 item(
                     v["name"],
                     c["id"],
-                    desc[:200],
+                    short_title(desc),
                     f"https://nvd.nist.gov/vuln/detail/{c['id']}",
                     c["id"],
                     cvss=score,
                     published=c["published"],
+                    updated=c.get("lastModified"),
                 )
             )
         await asyncio.sleep(0.7 if NVD_KEY else 6.5)  # NVD rate limit

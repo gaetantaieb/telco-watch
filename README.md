@@ -19,8 +19,10 @@ private chat; admins approve who can use it and manage what is monitored.
   product such as PHP) and vendor RSS, JSON or HTML sources. A failing source
   never blocks the others.
 - **Alerts in private chats**, one message per advisory: severity, CVSS, vendor,
-  title, CVEs, publication date and link. Actively exploited (KEV) and unscored
-  vendor advisories are always sent.
+  title, CVEs, publication date (Paris time) and link. Vendor ratings ("Severity:
+  High") count like a CVSS score when there is none. An old advisory that its
+  source has just updated comes as a one-line update. Actively exploited (KEV)
+  advisories, and those with neither a score nor a rating, are always sent.
 - **Personal settings**: minimum severity (`/severity`) and muted vendors
   (`/mute`).
 - **Access control**: a new user sends `/start`; admins get an Approve/Reject
@@ -41,14 +43,14 @@ Everyone (after approval):
 |---|---|
 | `/start`, `/help` | Request access, or show the commands |
 | `/status` (alias `/health`) | Last collection cycle: time, new items, failed sources |
-| `/latest [vendor] [n]` | Last *n* stored advisories (default 5, max 20), any severity |
-| `/latest all [days]` | High and above (CVSS ≥ 7 or KEV) from every vendor, published in the last *days* (default 7, max 90) |
+| `/latest [vendor] [n]` | Last *n* published advisories (default 5, max 20), any severity |
+| `/latest all [days]` | High and above (CVSS ≥ 7, vendor rating high or critical, or KEV) from every vendor, published in the last *days* (default 7, max 90) |
 | `/vendors` | Monitored vendors and their own sources |
 | `/ask <question>` | Ask about the stored alerts, e.g. `/ask anything actively exploited this week?` |
 | `/severity <critical\|high\|medium\|low>` | Minimum severity of your alerts (default high) |
 | `/mute <vendor>`, `/unmute <vendor>` | Stop or resume one vendor's alerts for you |
 
-Admins (`ADMIN_USER_IDS`):
+Admins (`ADMIN_USER_IDS`, plus users promoted with `/promote`):
 
 | Command | Effect |
 |---|---|
@@ -57,6 +59,7 @@ Admins (`ADMIN_USER_IDS`):
 | `/removevendor <name>` | Disable a vendor and its sources; history is kept |
 | `/users` | List users and their status |
 | `/adduser <id>`, `/removeuser <id>` | Give or remove access |
+| `/promote <id>`, `/demote <id>` | Give or take back the admin role (`ADMIN_USER_IDS` admins only) |
 
 ## Architecture
 
@@ -108,7 +111,7 @@ feeds ────┘                         └─> Telegram: one private chat
 | Variable | Value |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Bot token from BotFather |
-| `ADMIN_USER_IDS` | Telegram user ids of the admins, comma-separated |
+| `ADMIN_USER_IDS` | Telegram user ids of the permanent admins, comma-separated; they alone can `/promote` others |
 | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` |
 | `DATABASE_URL_RO` | URL of the read-only `ask_ro` role, created by the bot (in development, `${{Postgres.DATABASE_URL}}` is fine) |
 | `ASK_RO_PASSWORD` | Password of `ask_ro`, referenced by `DATABASE_URL_RO` (production) |
