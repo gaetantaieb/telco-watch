@@ -1286,6 +1286,34 @@ def test_ask_runs_tool_then_answers(monkeypatch):
     assert json.loads(result["content"]) == [{"vendor": "Cisco", "cvss": 9.8}]
 
 
+def ask_with(monkeypatch, rows, answer, tool=True):
+    monkeypatch.setattr(llm.db, "q_ro", lambda sql, p=(): rows)
+    final = SimpleNamespace(
+        stop_reason="end_turn", content=[block("text", text=answer)]
+    )
+    use = block("tool_use", id="t1", name="search_alerts", input={"cve": "CVE-2026-1"})
+    first = SimpleNamespace(stop_reason="tool_use", content=[use])
+    fake = FakeMessages([first, final] if tool else [final])
+    monkeypatch.setattr(llm, "client", SimpleNamespace(messages=fake))
+    return run(llm.ask("CVE-2026-1")), fake
+
+
+def test_ask_without_data_gives_the_english_default(monkeypatch):
+    answer, fake = ask_with(monkeypatch, [], "Ничего не найдено.")
+    assert answer == llm.NO_DATA and answer.startswith("No stored alert matches")
+    assert "unclear" in fake.calls[0]["system"] and "English" in fake.calls[0]["system"]
+
+
+def test_ask_with_data_keeps_the_model_answer(monkeypatch):
+    answer, _ = ask_with(monkeypatch, [{"vendor": "Cisco"}], "🔴 Cisco CVE-2026-1")
+    assert answer == "🔴 Cisco CVE-2026-1"
+
+
+def test_ask_never_returns_an_empty_answer(monkeypatch):
+    assert ask_with(monkeypatch, [{"vendor": "Cisco"}], "  ")[0] == llm.NO_DATA
+    assert ask_with(monkeypatch, [], "Hello", tool=False)[0] == "Hello"  # no tool
+
+
 # ---------- /addvendor (section 6) ----------
 def test_discover_validates_llm_output(monkeypatch):
     answer = json.dumps(
