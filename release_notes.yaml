@@ -1,0 +1,10 @@
+# What's new, newest entry first. At start-up the bot sends the newest entry once to
+# every active user (state key announced_version), so add one with every user-visible
+# change. Keep notes to 4 lines at most: longer ones are cut, and a test fails.
+
+- version: "2026-10-27"
+  notes: |
+    🆕 New in Telco Vendor Watch:
+    • Vendor ratings (e.g. "Severity: HIGH") now set the badge and count for /severity.
+    • Old advisories that a source updates come as a one-line 🔄 Update, not as a new alert.
+    • Dates in Paris time (dd-mm-yyyy HH:MM), long titles cut at a word, /promote for admins.

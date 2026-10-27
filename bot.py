@@ -10,6 +10,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import yaml
 from psycopg.types.json import Jsonb
 from telegram import (
     BotCommand,
@@ -897,11 +898,36 @@ async def set_menu(app):
         )
 
 
+def release_notes():
+    """The newest entry of release_notes.yaml: its version and notes (4 lines at most)."""
+    with open("release_notes.yaml") as f:
+        newest = yaml.safe_load(f)[0]
+    lines = newest["notes"].strip().splitlines()[:4]
+    return str(newest["version"]), "\n".join(lines)
+
+
+async def announce_release(bot):
+    """Sends the newest release notes once to every active user."""
+    version, notes = release_notes()
+    if db.get_state("announced_version") == version:
+        return
+    db.set_state("announced_version", version)  # first, so a restart never repeats it
+    users = active_users()
+    for user in users:
+        await send(bot, user["chat_id"], notes)
+    log.info("release %s announced to %d users", version, len(users))
+
+
+async def on_start(app):
+    await set_menu(app)
+    await announce_release(app.bot)
+
+
 def main():
     db.init()
     backfill_dates()
     backfill_ratings()
-    app = Application.builder().token(TOKEN).post_init(set_menu).build()
+    app = Application.builder().token(TOKEN).post_init(on_start).build()
     for name, fn in COMMANDS.items():
         app.add_handler(CommandHandler(name, fn, filters=PRIVATE))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^(add|cancel|uok|uno):"))

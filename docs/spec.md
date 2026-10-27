@@ -90,7 +90,7 @@ is missing.
 | `sources` | vendor, type (`rss`, `json`, `html`), url, parsing config, enabled, approving admin (`added_by`), added_at |
 | `items` | key = sha256(vendor + advisory id), vendor, title, url, CVEs, CVSS, KEV flag, publication date as given by the source, vendor `rating` (when there is no CVSS), `published_at` (parsed from it, else the collection time), `updated_at` (the source's last change: NVD `lastModified`, RSS/Atom `updated`, JSON `updated` field), `seen_at` |
 | `users` | Telegram id, name, status (`pending`, `active`, `blocked`), role (`user`, `admin` after `/promote`), `min_cvss`, muted vendors, approving admin, added_at |
-| `state` | `last_run`, `last_status` |
+| `state` | `last_run`, `last_status`, `announced_version` (section 5.3) |
 
 Every item is stored whatever its score. An item is stored once: the same
 advisory is never sent twice, across cycles and redeploys. Dates are parsed once,
@@ -152,6 +152,16 @@ only; a date that cannot be parsed is shown as the source gave it.
 Long titles are shortened without an LLM: a title that fits is kept as is,
 else its first sentence is used, cut at the last whole word with "…" if it is
 still too long (200 characters for NVD titles, 120 in compact lists).
+
+### 5.3 Release notes
+
+`release_notes.yaml` lists what changed in each version, newest first, in 4 lines
+at most per version. At start-up, after setting the command menu, the bot sends
+the newest notes to every active user if that version is not yet the state's
+`announced_version`, then records it. The version is recorded before sending, so
+a restart never repeats the notes, and a redeploy without a new entry sends
+nothing. Each environment has its own database, so each announces every version
+once. Notes longer than 4 lines are cut; a test also rejects them.
 
 ## 6. Users and access
 
