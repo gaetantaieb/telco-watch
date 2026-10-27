@@ -1,10 +1,14 @@
-# What's new, newest entry first. At start-up the bot sends the newest entry once to
-# every active user (state key announced_version), so add one with every user-visible
-# change. Keep notes to 4 lines at most: longer ones are cut, and a test fails.
+# What's new, newest entry first: one entry per production release (dev -> main).
+# While changes collect on dev, rewrite the newest entry in place (same version) so it
+# covers them all; production users get its final text once, after the release. After
+# a release, the next user-visible change starts a new entry with a new version.
+# The bot sends the newest entry once per environment (state key announced_version),
+# so development users only see an entry's first text. 4 lines at most: longer notes
+# are cut, and a test fails.
 
 - version: "2026-10-27"
   notes: |
     🆕 New in Telco Vendor Watch:
     • Vendor ratings (e.g. "Severity: HIGH") now set the badge and count for /severity.
-    • Old advisories that a source updates come as a one-line 🔄 Update, not as a new alert.
-    • Dates in Paris time (dd-mm-yyyy HH:MM), long titles cut at a word, /promote for admins.
+    • Old advisories that a source updates come as a one-line 🔄 Update, not a new alert.
+    • Paris-time dates, titles cut at a word, /ask "no match" in English, /promote for admins.

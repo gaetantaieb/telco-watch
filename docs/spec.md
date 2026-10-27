@@ -155,8 +155,11 @@ still too long (200 characters for NVD titles, 120 in compact lists).
 
 ### 5.3 Release notes
 
-`release_notes.yaml` lists what changed in each version, newest first, in 4 lines
-at most per version. At start-up, after setting the command menu, the bot sends
+`release_notes.yaml` lists what changed in each production release, newest
+first, in 4 lines at most per release. While changes collect on `dev`, the newest
+entry is rewritten in place under the same version, so production gets one
+message covering the whole release; `development` users only see that entry's
+first text. At start-up, after setting the command menu, the bot sends
 the newest notes to every active user if that version is not yet the state's
 `announced_version`, then records it. The version is recorded before sending, so
 a restart never repeats the notes, and a redeploy without a new entry sends
