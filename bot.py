@@ -188,6 +188,21 @@ def backfill_dates():
         )
 
 
+def backfill_ratings():
+    """Items stored before vendor ratings were read get one from their stored title.
+
+    Runs at every start, so stored items also benefit when the patterns improve; items
+    with neither a score nor a rating in their title are only read, never rewritten.
+    """
+    for r in db.q("SELECT key, title FROM items WHERE cvss IS NULL AND rating IS NULL"):
+        cvss, rating = col.vendor_score(r["title"] or "")
+        if cvss is not None or rating:
+            db.q(
+                "UPDATE items SET cvss = %s, rating = %s WHERE key = %s",
+                (cvss, rating, r["key"]),
+            )
+
+
 # ---------- users ----------
 def get_user(uid):
     return db.q("SELECT * FROM users WHERE chat_id = %s", (uid,), one=True)
@@ -885,6 +900,7 @@ async def set_menu(app):
 def main():
     db.init()
     backfill_dates()
+    backfill_ratings()
     app = Application.builder().token(TOKEN).post_init(set_menu).build()
     for name, fn in COMMANDS.items():
         app.add_handler(CommandHandler(name, fn, filters=PRIVATE))

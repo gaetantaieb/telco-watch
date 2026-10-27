@@ -66,7 +66,10 @@ Base Score: 9.8", not a vector string) becomes the item's CVSS; otherwise a
 vendor rating ("Severity: HIGH" in Palo Alto titles, "Security Impact Rating:
 Critical" at Cisco, "High severity", a JSON source's `severity` field) is stored
 as `rating`: critical, high, medium or low, with moderate read as medium and
-important as high.
+important as high. At every start, stored items with neither a score nor a
+rating are read again from their stored title (the summary is not stored), so
+advisories collected before ratings were read, or before a pattern improved,
+get theirs too.
 
 The seeded vendor feeds are Cisco PSIRT RSS, FortiGuard RSS and Palo Alto
 Networks RSS. The other seeded vendors are covered by KEV and NVD until an admin

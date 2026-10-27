@@ -1031,6 +1031,26 @@ def test_set_menu_sets_the_admin_menu_per_admin_chat(monkeypatch):
     assert len(calls) == 3
 
 
+def test_backfill_rates_stored_items_from_their_title(monkeypatch):
+    rows = [
+        {"key": "a", "title": "PAN-OS: DoS in DNS proxy (Severity: CRITICAL)"},
+        {"key": "b", "title": "Router flaw, CVSS v3.1 Base Score: 8.6"},
+        {"key": "c", "title": "FortiOS heap overflow"},  # nothing to read: untouched
+        {"key": "d", "title": None},
+    ]
+    updates = []
+
+    def q(sql, params=(), one=False):
+        if sql.startswith("SELECT"):
+            assert "cvss IS NULL AND rating IS NULL" in sql
+            return rows
+        updates.append(params)
+
+    monkeypatch.setattr(bot, "db", SimpleNamespace(q=q))
+    bot.backfill_ratings()
+    assert updates == [(None, "critical", "a"), (8.6, None, "b")]
+
+
 def test_permanent_admins_promote_and_demote(monkeypatch):
     monkeypatch.setattr(bot, "ADMINS", {42})
     users = FakeUsers(
