@@ -19,8 +19,10 @@ private chat; admins approve who can use it and manage what is monitored.
   product such as PHP) and vendor RSS, JSON or HTML sources. A failing source
   never blocks the others.
 - **Alerts in private chats**, one message per advisory: severity, CVSS, vendor,
-  title, CVEs, publication date and link. Actively exploited (KEV) and unscored
-  vendor advisories are always sent.
+  title, CVEs, publication date (Paris time) and link. Vendor ratings ("Severity:
+  High") count like a CVSS score when there is none. An old advisory that its
+  source has just updated comes as a one-line update. Actively exploited (KEV)
+  advisories, and those with neither a score nor a rating, are always sent.
 - **Personal settings**: minimum severity (`/severity`) and muted vendors
   (`/mute`).
 - **Access control**: a new user sends `/start`; admins get an Approve/Reject
@@ -41,8 +43,8 @@ Everyone (after approval):
 |---|---|
 | `/start`, `/help` | Request access, or show the commands |
 | `/status` (alias `/health`) | Last collection cycle: time, new items, failed sources |
-| `/latest [vendor] [n]` | Last *n* stored advisories (default 5, max 20), any severity |
-| `/latest all [days]` | High and above (CVSS ≥ 7 or KEV) from every vendor, published in the last *days* (default 7, max 90) |
+| `/latest [vendor] [n]` | Last *n* published advisories (default 5, max 20), any severity |
+| `/latest all [days]` | High and above (CVSS ≥ 7, vendor rating high or critical, or KEV) from every vendor, published in the last *days* (default 7, max 90) |
 | `/vendors` | Monitored vendors and their own sources |
 | `/ask <question>` | Ask about the stored alerts, e.g. `/ask anything actively exploited this week?` |
 | `/severity <critical\|high\|medium\|low>` | Minimum severity of your alerts (default high) |
