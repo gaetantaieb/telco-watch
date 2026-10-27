@@ -236,7 +236,11 @@ Queries are parameterised and run on the read-only connection (`DATABASE_URL_RO`
 role `ask_ro` with `SELECT` on `items` and `vendors` only). When that URL names a
 different account than `DATABASE_URL`, the bot creates the role, or resets its
 password, at every start, so it always matches the variable. At most 5 tool rounds;
-the answer is plain text cut at 4,000 characters. "Past N days" uses the
+the answer is plain text cut at 4,000 characters. It is in the language of the
+question, English when that is unclear (a vendor or CVE alone). When the tools
+were called and returned nothing, or the model's answer is empty, the bot answers
+with a fixed English message instead: "No stored alert matches your question.
+Try /latest, or name a vendor, a CVE or a period." "Past N days" uses the
 collection time (`seen_at`), not the publication date. Alert titles are
 untrusted: the system prompt tells the model to ignore instructions in them.
 
