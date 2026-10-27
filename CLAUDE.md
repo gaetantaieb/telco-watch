@@ -15,5 +15,8 @@ Original design: docs/specs.pdf. Overview and setup: README.md.
 - Detection and alerting stay deterministic; the LLM is only used by /ask (llm.py)
   and /addvendor (onboard.py), and a vendor is stored only after an admin approves it.
 - llm.py uses the read-only database role (DATABASE_URL_RO).
+- Every user-visible change is described in release_notes.yaml: one entry per
+  production release, 4 lines at most. Until that release, rewrite the newest entry
+  in place (same version); after it, start a new entry with a new version.
 - Every change adds or updates a test; run ruff format, ruff check and pytest before finishing.
 - Work on a branch and open a pull request; never push to main.
