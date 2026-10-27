@@ -32,6 +32,8 @@ private chat; admins approve who can use it and manage what is monitored.
 - **`/addvendor`**: Claude searches the web for a vendor's or technology's
   official advisory sources; the bot tests each one and stores it only after an
   admin taps Approve.
+- **Release notes**: after an update, every user gets the new version's notes
+  from `release_notes.yaml` (4 lines at most), once.
 - **Self-healing**: database connections are checked before use, failed commands
   answer instead of staying silent, and the command menu is set by the bot itself.
 

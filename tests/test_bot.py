@@ -1384,6 +1384,57 @@ def test_test_source_refuses_internal_urls():
     assert not ok and msg.startswith("refused") and sample == []
 
 
+# ---------- release notes ----------
+def test_release_notes_are_short_and_versions_unique():
+    entries = yaml.safe_load((ROOT / "release_notes.yaml").read_text())
+    versions = [str(e["version"]) for e in entries]
+    assert versions and len(versions) == len(set(versions))
+    for e in entries:
+        lines = e["notes"].strip().splitlines()
+        assert 1 <= len(lines) <= 4, e["version"]
+
+
+def test_release_notes_go_once_to_active_users(monkeypatch):
+    fake_db = FakeDB()
+    monkeypatch.setattr(bot, "db", fake_db)
+    monkeypatch.setattr(bot, "active_users", lambda: [user(chat_id=1), user(chat_id=2)])
+    monkeypatch.setattr(bot, "release_notes", lambda: ("v2", "🆕 New\n• a"))
+    fake_bot = FakeBot()
+    run(bot.announce_release(fake_bot))
+    assert fake_bot.sent == [(1, "🆕 New\n• a"), (2, "🆕 New\n• a")]
+    assert fake_db.state["announced_version"] == "v2"
+    run(bot.announce_release(fake_bot))  # a redeploy without new notes sends nothing
+    assert len(fake_bot.sent) == 2
+    monkeypatch.setattr(bot, "release_notes", lambda: ("v3", "🆕 Newer"))
+    run(bot.announce_release(fake_bot))
+    assert fake_bot.sent[-2:] == [(1, "🆕 Newer"), (2, "🆕 Newer")]
+
+
+def test_release_notes_are_cut_to_4_lines(monkeypatch, tmp_path):
+    (tmp_path / "release_notes.yaml").write_text(
+        '- version: "2"\n  notes: |\n    1\n    2\n    3\n    4\n    5\n'
+        '- version: "1"\n  notes: old\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    assert bot.release_notes() == ("2", "1\n2\n3\n4")
+
+
+def test_start_up_sets_the_menu_then_announces(monkeypatch):
+    calls = []
+
+    async def set_menu(app):
+        calls.append("menu")
+
+    async def announce(b):
+        calls.append(("announce", b))
+
+    monkeypatch.setattr(bot, "set_menu", set_menu)
+    monkeypatch.setattr(bot, "announce_release", announce)
+    app = SimpleNamespace(bot="the bot")
+    run(bot.on_start(app))
+    assert calls == ["menu", ("announce", "the bot")]
+
+
 # ---------- seed.yaml ----------
 def test_seed_lists_all_vendors_of_section_2_2():
     seed = yaml.safe_load((ROOT / "seed.yaml").read_text())
