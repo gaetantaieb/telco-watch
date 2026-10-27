@@ -207,6 +207,20 @@ def test_fetch_rss():
     assert it["url"] == "https://vendor.example/a1"
     assert it["cves"] == ["CVE-2026-11111", "CVE-2026-22222"]
     assert "2026" in it["published"]
+    assert it["updated"] == ""  # an RSS item without an update date gets none
+
+
+def test_fetch_atom_reads_the_update_date():
+    atom = (
+        '<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>a</id><title>t</title>'
+        "<published>2026-10-01T09:00:00Z</published>"
+        "<updated>2026-10-23T09:00:00Z</updated></entry></feed>"
+    )
+    client = mock_client(lambda r: httpx.Response(200, text=atom))
+    src = {"vendor": "X", "type": "rss", "url": "https://x.example/", "config": {}}
+    [it] = run(collectors.fetch_rss(client, src))
+    assert it["published"].startswith("2026-10-01")
+    assert it["updated"].startswith("2026-10-23")
 
 
 def test_fetch_json():
@@ -337,6 +351,7 @@ def test_fetch_nvd_reads_best_cvss_and_queries_since(monkeypatch):
                 "cve": {
                     "id": "CVE-2026-5555",
                     "published": "2026-10-22T09:14:00.000",
+                    "lastModified": "2026-10-23T07:00:00.000",
                     "descriptions": [{"lang": "en", "value": "Cisco IOS XR flaw"}],
                     "metrics": {"cvssMetricV31": [{"cvssData": {"baseScore": 9.8}}]},
                 }
@@ -352,6 +367,7 @@ def test_fetch_nvd_reads_best_cvss_and_queries_since(monkeypatch):
     out = run(collectors.fetch_nvd(mock_client(handler), VENDORS[:1], since))
     assert [it["cvss"] for it in out] == [9.8]
     assert out[0]["title"] == "Cisco IOS XR flaw"
+    assert out[0]["updated"] == "2026-10-23T07:00:00.000"
     assert seen[0]["keywordSearch"] == "Cisco"
     assert seen[0]["lastModStartDate"].startswith("2026-10-22T08:00:00.000")
 
@@ -449,6 +465,70 @@ def test_new_items_are_sent_once_and_failures_reported(monkeypatch):
     assert "failed: NVD" in fake_db.state["last_status"]
     # The same advisory is never sent twice.
     assert run_cycle(monkeypatch, fake_db, items, users=users) == []
+
+
+def test_old_advisories_changed_by_their_source_are_one_line_updates(monkeypatch):
+    fake_db = FakeDB({"last_run": (datetime.now(UTC) - timedelta(hours=1)).isoformat()})
+    items = [
+        item(id="new", cvss=9.8, title="Fresh flaw", published=ago(0.1)),
+        item(
+            id="old",
+            cvss=9.8,
+            cves=["CVE-2019-1"],
+            title=LONG,
+            published="2019-03-12T10:00:00.000",
+            updated="2026-01-15T09:14:00.000",
+        ),
+    ]
+    sent = [text for _, text in run_cycle(monkeypatch, fake_db, items, users=[user()])]
+    assert sent[0].startswith("<b>🔴 CRITICAL") and "Fresh flaw" in sent[0]
+    line, url = sent[1].split("\n")
+    assert line.startswith(
+        "🔄 <b>Update</b> · 🔴 CRITICAL · CVSS 9.8 · Cisco · CVE-2019-1"
+    )
+    assert "published 12-03-2019 11:00 CET" in line
+    assert line.endswith("· last updated 15-01-2026 10:14 CET") and url == "u"
+
+
+def test_update_lines_still_follow_the_user_settings(monkeypatch):
+    fake_db = FakeDB({"last_run": (datetime.now(UTC) - timedelta(hours=1)).isoformat()})
+    old = [item(id="o", cvss=5.0, published="2019-03-12")]
+    assert run_cycle(monkeypatch, fake_db, old, users=[user()]) == []  # below /severity
+
+
+def test_store_keeps_the_parsed_dates(monkeypatch):
+    calls = []
+
+    def q(sql, params=(), one=False):
+        calls.append(params)
+        return {"key": params[0]}
+
+    monkeypatch.setattr(bot, "db", SimpleNamespace(q=q))
+    it = item(published="Thu, 22 Oct 2026 09:14:00 GMT", updated="2026-10-23")
+    bot.store(it)
+    assert calls[0][-2:] == (
+        datetime(2026, 10, 22, 9, 14, tzinfo=UTC),
+        datetime(2026, 10, 23, tzinfo=UTC),
+    )
+    bot.store(item(published="soon"))  # no date: collection time, no update date
+    assert calls[1][-1] is None and calls[1][-2] > datetime.now(UTC) - timedelta(1)
+
+
+def test_backfill_parses_the_dates_of_older_rows(monkeypatch):
+    seen = datetime(2026, 10, 1, tzinfo=UTC)
+    rows = [{"key": "a", "published": "2026-09-30", "seen_at": seen}]
+    rows.append({"key": "b", "published": "", "seen_at": seen})
+    updates = []
+
+    def q(sql, params=(), one=False):
+        if sql.startswith("SELECT"):
+            assert "published_at IS NULL" in sql
+            return rows
+        updates.append(params)
+
+    monkeypatch.setattr(bot, "db", SimpleNamespace(q=q))
+    bot.backfill_dates()
+    assert updates == [(datetime(2026, 9, 30, tzinfo=UTC), "a"), (seen, "b")]
 
 
 def test_a_user_who_blocked_the_bot_does_not_stop_the_others():
@@ -729,6 +809,13 @@ def ago(days):
     return (datetime.now(UTC) - timedelta(days=days)).isoformat()
 
 
+def stored(**kw):
+    """An item as read back from the database, with its parsed publication date."""
+    it = item(**kw)
+    it["published_at"] = bot.published_at(it)
+    return it
+
+
 def run_latest_all(monkeypatch, rows, args):
     calls = []
 
@@ -746,9 +833,9 @@ def run_latest_all(monkeypatch, rows, args):
 def test_latest_all_lists_high_and_above_by_publication_date(monkeypatch):
     now = datetime.now(UTC)
     rows = [
-        item(id="a", vendor="Nokia", cvss=7.5, published=ago(2), seen_at=now),
-        item(id="b", vendor="Cisco", cvss=9.8, published=ago(1), seen_at=now),
-        item(
+        stored(id="a", vendor="Nokia", cvss=7.5, published=ago(2), seen_at=now),
+        stored(id="b", vendor="Cisco", cvss=9.8, published=ago(1), seen_at=now),
+        stored(
             id="c",
             vendor="ZTE",
             kev=True,
@@ -757,10 +844,7 @@ def test_latest_all_lists_high_and_above_by_publication_date(monkeypatch):
             published=ago(3),
             seen_at=now,
         ),
-        item(
-            id="old", vendor="Huawei", kev=True, published="2021-05-01", seen_at=now
-        ),  # backlog
-        item(
+        stored(
             id="adv",
             vendor="Fortinet",
             title="FortiOS advisory",
@@ -771,11 +855,11 @@ def test_latest_all_lists_high_and_above_by_publication_date(monkeypatch):
     replies, calls = run_latest_all(monkeypatch, rows, ["all", "5"])
     sql, params = calls[0]
     assert "kev OR cvss >= %s" in sql and params == (7.0, 5)
+    assert "published_at >= now()" in sql  # an old item stored today is left out
     text = "\n\n".join(replies)
     assert text.startswith("High and above, all vendors, last 5 days: 3")
-    # KEV first, then by score; the 2021 KEV entry stored today is left out.
+    # KEV first, then by score.
     assert text.index("ZTE") < text.index("Cisco") < text.index("Nokia")
-    assert "Huawei" not in text
     assert "without a CVSS score: 1" in text and "FortiOS advisory" in text
 
 
@@ -790,7 +874,7 @@ def test_latest_all_defaults_to_7_days_and_caps_at_90(monkeypatch):
 def test_latest_all_splits_long_lists_and_caps_them(monkeypatch):
     now = datetime.now(UTC)
     rows = [
-        item(
+        stored(
             id=str(i),
             cvss=9.0,
             title="x" * 100,
@@ -821,6 +905,7 @@ def test_brief_shortens_long_titles_at_a_word():
 def test_latest_with_a_vendor_still_works(monkeypatch):
     _, calls = run_latest_all(monkeypatch, [], ["Cisco", "3"])
     assert "vendor ILIKE" in calls[0][0] and calls[0][1] == ["%Cisco%", 3]
+    assert "ORDER BY published_at DESC" in calls[0][0]  # not by collection time
 
 
 def test_menu_lists_real_commands_and_admin_ones_only_for_admins():

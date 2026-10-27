@@ -19,7 +19,9 @@ KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulner
 NVD_KEY = os.environ.get("NVD_API_KEY")
 
 
-def item(vendor, ident, title, url, text="", cvss=None, kev=False, published=""):
+def item(
+    vendor, ident, title, url, text="", cvss=None, kev=False, published="", updated=""
+):
     title = (title or "").strip()
     return {
         "vendor": vendor,
@@ -30,6 +32,7 @@ def item(vendor, ident, title, url, text="", cvss=None, kev=False, published="")
         "cvss": cvss,
         "kev": kev,
         "published": str(published or ""),
+        "updated": str(updated or ""),  # the source's last change, when it gives one
     }
 
 
@@ -96,13 +99,16 @@ async def fetch_rss(client, src):
             e.get("link", ""),
             e.get("summary", ""),
             published=e.get("published"),
+            updated=dict.get(
+                e, "updated"
+            ),  # e.get would warn and fall back to published
         )
         for e in feedparser.parse(r.text).entries
     ]
 
 
 async def fetch_json(client, src):
-    cfg = src["config"]  # {"list": "a.b", "id": .., "title": .., "url": .., "date": ..}
+    cfg = src["config"]  # {"list": "a.b", "id", "title", "url", "date", "updated"}
     r = await client.get(src["url"])
     r.raise_for_status()
     data = r.json()
@@ -116,6 +122,7 @@ async def fetch_json(client, src):
             str(d.get(cfg.get("url", ""), src["url"])),
             json.dumps(d)[:2000],
             published=d.get(cfg.get("date", "")),
+            updated=d.get(cfg.get("updated", "")),
         )
         for d in data[:100]
     ]
@@ -214,6 +221,7 @@ async def fetch_nvd(client, vendors, since):
                     c["id"],
                     cvss=score,
                     published=c["published"],
+                    updated=c.get("lastModified"),
                 )
             )
         await asyncio.sleep(0.7 if NVD_KEY else 6.5)  # NVD rate limit

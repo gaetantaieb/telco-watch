@@ -121,12 +121,28 @@ def fmt(it):
     )
 
 
+def update_line(it):
+    """An old advisory collected only now because its source changed it: one line, not an alert."""
+    e = html.escape
+    score = f" · CVSS {it['cvss']}" if it["cvss"] is not None else ""
+    cves = f" · {', '.join(it['cves'])}" if it["cves"] else ""
+    published = f" · published {when(it['published'])}" if it["published"] else ""
+    changed = when(it["updated_at"] or datetime.now(UTC))
+    return (
+        f"🔄 <b>Update</b> · {severity(it)}{score} · {e(it['vendor'] + cves)} · "
+        f"{e(col.short_title(it['title'], 120))}{e(published)} · last updated {changed}\n"
+        f"{e(it['url'] or '')}"
+    )
+
+
 def store(it):
-    """Insert an item; True only if it was not already in the database."""
+    """Insert an item, with its parsed dates; True only if it was not already in the database."""
     key = hashlib.sha256(f"{it['vendor']}|{it['id']}".encode()).hexdigest()
+    it["published_at"] = col.parse_date(it["published"]) or datetime.now(UTC)
+    it["updated_at"] = col.parse_date(it.get("updated"))
     row = db.q(
-        "INSERT INTO items (key, vendor, title, url, cves, cvss, kev, published) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+        "INSERT INTO items (key, vendor, title, url, cves, cvss, kev, published, "
+        "published_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
         "ON CONFLICT (key) DO NOTHING RETURNING key",
         (
             key,
@@ -137,10 +153,23 @@ def store(it):
             it["cvss"],
             it["kev"],
             it["published"],
+            it["published_at"],
+            it["updated_at"],
         ),
         one=True,
     )
     return row is not None
+
+
+def backfill_dates():
+    """Items stored before published_at existed get it from their published text."""
+    for r in db.q(
+        "SELECT key, published, seen_at FROM items WHERE published_at IS NULL"
+    ):
+        db.q(
+            "UPDATE items SET published_at = %s WHERE key = %s",
+            (published_at(r), r["key"]),
+        )
 
 
 # ---------- users ----------
@@ -245,14 +274,18 @@ async def cycle(context: ContextTypes.DEFAULT_TYPE):
         log.info("first run: backlog stored, nothing sent")
         return
     users = active_users()
+    # Published well before the previous cycle: not a new advisory, an old one the
+    # source has just changed (NVD re-analysis), so it gets a one-line update.
+    old = since - timedelta(days=1)
     for it in new:
+        text = fmt(it) if it["published_at"] >= old else update_line(it)
         sent = False
         for user in users:
             if wants(user, it):
                 sent |= await send(
                     context.bot,
                     user["chat_id"],
-                    fmt(it),
+                    text,
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
                 )
@@ -367,7 +400,7 @@ async def latest(u: Update, c: ContextTypes.DEFAULT_TYPE):
     vendor = args[0] if args and not args[0].isdigit() else None
     sql = "SELECT * FROM items" + (" WHERE vendor ILIKE %s" if vendor else "")
     params = ([f"%{vendor}%"] if vendor else []) + [min(n, 20)]
-    rows = db.q(sql + " ORDER BY seen_at DESC LIMIT %s", params)
+    rows = db.q(sql + " ORDER BY published_at DESC NULLS LAST LIMIT %s", params)
     if not rows:
         return await u.message.reply_text("Nothing stored yet.")
     for it in rows:
@@ -401,20 +434,17 @@ def chunks(blocks, limit=4000):
 
 async def latest_all(u: Update, days, cap=40):
     """/latest all [days]: high and above from every vendor, by publication date."""
-    # An advisory published in the last days was also collected in them (never before).
     rows = db.q(
         "SELECT * FROM items WHERE (kev OR cvss >= %s OR cvss IS NULL) "
-        "AND seen_at >= now() - %s * interval '1 day'",
+        "AND published_at >= now() - %s * interval '1 day'",
         (LEVELS["high"], days),
     )
-    since = datetime.now(UTC) - timedelta(days=days)
-    rows = [r for r in rows if published_at(r) >= since]
     scored = [r for r in rows if r["kev"] or r["cvss"] is not None]
     unscored = [r for r in rows if not r["kev"] and r["cvss"] is None]
     scored.sort(
-        key=lambda r: (not r["kev"], -(r["cvss"] or 0), -published_at(r).timestamp())
+        key=lambda r: (not r["kev"], -(r["cvss"] or 0), -r["published_at"].timestamp())
     )
-    unscored.sort(key=lambda r: -published_at(r).timestamp())
+    unscored.sort(key=lambda r: -r["published_at"].timestamp())
     if not scored and not unscored:
         return await u.message.reply_text(
             f"No high or critical alert in the last {days} days."
@@ -739,6 +769,7 @@ async def set_menu(app):
 
 def main():
     db.init()
+    backfill_dates()
     app = Application.builder().token(TOKEN).post_init(set_menu).build()
     for name, fn in COMMANDS.items():
         app.add_handler(CommandHandler(name, fn, filters=PRIVATE))

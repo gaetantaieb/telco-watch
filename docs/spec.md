@@ -41,7 +41,9 @@ A job runs 10 s after start, then every hour. Each cycle:
    and named in the cycle status, and never stops the others;
 3. stores every item not already in the database (section 4);
 4. records `last_run` and the status line shown by `/status`;
-5. sends each new item to every active user who wants it (section 5), then
+5. sends each new item to every active user who wants it (section 5): a full
+   alert, or a one-line update when the item was published more than a day before
+   the previous cycle (section 5.2), then
    "⚠️ Sources failed: …" to the admins if any source failed.
 
 On the very first cycle (no `last_run`), the backlog is stored and nothing is
@@ -55,7 +57,7 @@ outage is caught up on the next cycle.
 | CISA KEV catalogue (JSON) | Whole-word match of the vendor's `nvd_keyword` on the KEV vendor and product, so "PHP" matches PHP but not phpMyAdmin. Every KEV item is flagged as actively exploited. |
 | NVD API 2.0 | `virtualMatchString` with the vendor's `nvd_cpe` when it has one (e.g. `cpe:2.3:a:php:php`), else `keywordSearch` with its `nvd_keyword`; changes since the last cycle. CVSS is read from v4.0, else v3.1, else v3.0. The title is the English description, shortened (section 5.2). Throttled to the NVD rate limit. |
 | Vendor RSS/Atom | Every entry. |
-| Vendor JSON API | Configurable list path and field names (id, title, url, date); at most 100 entries. |
+| Vendor JSON API | Configurable list path and field names (id, title, url, date, optional updated); at most 100 entries. |
 | Vendor HTML page | CSS selectors for the advisory row, title and link; at most 50 rows. |
 
 The seeded vendor feeds are Cisco PSIRT RSS, FortiGuard RSS and Palo Alto
@@ -75,12 +77,14 @@ is missing.
 |---|---|
 | `vendors` | name, `nvd_keyword`, optional `nvd_cpe`, enabled, added_at |
 | `sources` | vendor, type (`rss`, `json`, `html`), url, parsing config, enabled, approving admin (`added_by`), added_at |
-| `items` | key = sha256(vendor + advisory id), vendor, title, url, CVEs, CVSS, KEV flag, publication date as given by the source, `seen_at` |
+| `items` | key = sha256(vendor + advisory id), vendor, title, url, CVEs, CVSS, KEV flag, publication date as given by the source, `published_at` (parsed from it, else the collection time), `updated_at` (the source's last change: NVD `lastModified`, RSS/Atom `updated`, JSON `updated` field), `seen_at` |
 | `users` | Telegram id, name, status (`pending`, `active`, `blocked`), `min_cvss`, muted vendors, approving admin, added_at |
 | `state` | `last_run`, `last_status` |
 
 Every item is stored whatever its score. An item is stored once: the same
-advisory is never sent twice, across cycles and redeploys.
+advisory is never sent twice, across cycles and redeploys. Dates are parsed once,
+when the item is stored (ISO 8601, RFC 2822); rows stored before `published_at`
+existed are backfilled at start-up.
 
 ## 5. Alerts
 
@@ -113,6 +117,17 @@ https://…
 | 🟡 MEDIUM | 4.0 – 6.9 |
 | ⚪ LOW | < 4.0 |
 | 🔵 ADVISORY | no CVSS score |
+
+An item published more than a day before the previous cycle is an old advisory
+that its source has just changed (typically an NVD re-analysis of an old CVE),
+not a new one. It is sent, with the same filters, as one line plus its link:
+
+```
+🔄 Update · 🟠 HIGH · CVSS 7.5 · Cisco · CVE-2019-1234 · <title> · published 12-03-2019 11:00 CET · last updated 27-10-2026 09:12 CET
+https://…
+```
+
+"Last updated" is the source's update date, else the collection time.
 
 Dates are shown as `dd-mm-yyyy HH:MM` in Paris time, labelled CET or CEST
 (summer time). A source date without a time (CISA KEV) is shown as `dd-mm-yyyy`
@@ -154,8 +169,8 @@ commands, and each admin's chat also lists the admin ones.
 |---|---|
 | `/start`, `/help` | Access request (section 6), or the command list for active users; admins also see the admin commands. |
 | `/status`, `/health` | "<dd-mm-yyyy HH:MM CET> · N new · failed: …" for the last cycle (Paris time, section 5.2). |
-| `/latest [vendor] [n]` | Last *n* stored items (default 5, max 20), newest first by collection time, optionally for vendors matching *vendor*. Any severity; personal settings do not apply. |
-| `/latest all [days]` | Every item with CVSS ≥ 7 or in KEV, from all vendors, **published** in the last *days* (default 7, max 90). Publication dates are parsed from each source's format (ISO, RFC 2822) and fall back to the collection time. KEV first, then by score; unscored vendor advisories in a separate section. One compact list (titles shortened, section 5.2), split under Telegram's limit, capped at 40 (+20 unscored). Mutes do not apply. |
+| `/latest [vendor] [n]` | Last *n* stored items (default 5, max 20), newest first by publication date, optionally for vendors matching *vendor*. Any severity; personal settings do not apply. |
+| `/latest all [days]` | Every item with CVSS ≥ 7 or in KEV, from all vendors, **published** in the last *days* (default 7, max 90), by `published_at`: an old advisory collected recently because its source changed it is left out. KEV first, then by score; unscored vendor advisories in a separate section. One compact list (titles shortened, section 5.2), split under Telegram's limit, capped at 40 (+20 unscored). Mutes do not apply. |
 | `/vendors` | Each vendor, enabled or paused, with its number of own sources (+ KEV/NVD). |
 | `/ask <question>` | Plain-language answer about the stored alerts (section 7.3). One question every 10 s per user, 500 characters max. |
 | `/severity <critical\|high\|medium\|low>` | Sets the user's threshold to 9.0, 7.0, 4.0 or 0. Without an argument, shows the current one. New users start at `MIN_CVSS`. |
@@ -213,7 +228,7 @@ From the original design ([specs.pdf](specs.pdf)):
 
 | Item | Original design | Today |
 |---|---|---|
-| Updated advisories (F4) | Re-send as "Updated" when the update date or CVSS changes | An advisory is sent once; later changes are not tracked |
+| Updated advisories (F4) | Re-send as "Updated" when the update date or CVSS changes | An advisory is sent once; later changes to a stored advisory are not tracked. An old advisory first collected because its source changed it gets a one-line update (section 5.2) |
 | EPSS (F5) | Add the exploitation probability to each CVE | Not collected |
 | Watch-list (F6) | `/watch`, `/unwatch`, "IN OUR NETWORK" tag | Not built; `/mute` is the only per-vendor filter |
 | Daily digest (F7) | Medium and Low grouped in an 08:00 digest, `/digest` | No digest; `/severity` decides what is sent immediately, and `/latest all` gives a summary on demand |

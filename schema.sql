@@ -45,3 +45,9 @@ CREATE TABLE IF NOT EXISTS users (                   -- people using the bot in 
 -- A product or technology (e.g. PHP) is matched in NVD by its CPE instead of a keyword,
 -- so CVEs that only mention it ("a PHP application...") are not collected.
 ALTER TABLE vendors ADD COLUMN IF NOT EXISTS nvd_cpe TEXT;     -- e.g. cpe:2.3:a:php:php
+
+-- Parsed dates: lists sort by publication, and an old advisory that a source has just
+-- changed (NVD re-analysis) is told apart from a new one. Backfilled at start-up.
+ALTER TABLE items ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ; -- else seen_at
+ALTER TABLE items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;   -- if the source gives it
+CREATE INDEX IF NOT EXISTS items_published_at ON items (published_at DESC);
