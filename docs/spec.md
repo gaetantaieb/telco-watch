@@ -101,7 +101,7 @@ and skipped. The bot pauses about 1 s between alerts (Telegram rate limit).
 Vendor: Cisco
 Title: IOS XR SSH remote code execution
 CVE: CVE-2026-XXXXX
-Published: 2026-10-22T09:14:00.000
+Published: 22-10-2026 11:14 CEST
 https://…
 ```
 
@@ -113,6 +113,10 @@ https://…
 | 🟡 MEDIUM | 4.0 – 6.9 |
 | ⚪ LOW | < 4.0 |
 | 🔵 ADVISORY | no CVSS score |
+
+Dates are shown as `dd-mm-yyyy HH:MM` in Paris time, labelled CET or CEST
+(summer time). A source date without a time (CISA KEV) is shown as `dd-mm-yyyy`
+only; a date that cannot be parsed is shown as the source gave it.
 
 Long titles are shortened without an LLM: a title that fits is kept as is,
 else its first sentence is used, cut at the last whole word with "…" if it is
@@ -149,7 +153,7 @@ commands, and each admin's chat also lists the admin ones.
 | Command | Behaviour |
 |---|---|
 | `/start`, `/help` | Access request (section 6), or the command list for active users; admins also see the admin commands. |
-| `/status`, `/health` | "<time> UTC · N new · failed: …" for the last cycle. |
+| `/status`, `/health` | "<dd-mm-yyyy HH:MM CET> · N new · failed: …" for the last cycle (Paris time, section 5.2). |
 | `/latest [vendor] [n]` | Last *n* stored items (default 5, max 20), newest first by collection time, optionally for vendors matching *vendor*. Any severity; personal settings do not apply. |
 | `/latest all [days]` | Every item with CVSS ≥ 7 or in KEV, from all vendors, **published** in the last *days* (default 7, max 90). Publication dates are parsed from each source's format (ISO, RFC 2822) and fall back to the collection time. KEV first, then by score; unscored vendor advisories in a separate section. One compact list (titles shortened, section 5.2), split under Telegram's limit, capped at 40 (+20 unscored). Mutes do not apply. |
 | `/vendors` | Each vendor, enabled or paused, with its number of own sources (+ KEV/NVD). |

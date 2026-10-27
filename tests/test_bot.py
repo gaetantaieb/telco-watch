@@ -702,6 +702,29 @@ def test_published_at_reads_every_source_format(published, expected):
     assert bot.published_at(it) == expected
 
 
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("2026-01-15T09:14:00.000", "15-01-2026 10:14 CET"),  # NVD, UTC, winter
+        ("Thu, 22 Oct 2026 09:14:00 GMT", "22-10-2026 11:14 CEST"),  # RSS, summer
+        ("2026-10-22T09:14:00-07:00", "22-10-2026 18:14 CEST"),  # any offset
+        (datetime(2026, 10, 27, 8, 5, tzinfo=UTC), "27-10-2026 09:05 CET"),
+        ("2026-10-20", "20-10-2026"),  # KEV: a date without a time stays a date
+        ("next week", "next week"),  # unreadable: shown as given
+        ("", ""),
+    ],
+)
+def test_dates_are_shown_in_paris_time(value, expected):
+    assert bot.when(value) == expected
+
+
+def test_alerts_and_status_use_paris_time(monkeypatch):
+    assert "<b>Published:</b> 20-10-2026\n" in bot.fmt(item(published="2026-10-20"))
+    fake_db = FakeDB({"last_run": "2026-10-22T08:00:00+00:00"})
+    run_cycle(monkeypatch, fake_db, [])
+    assert fake_db.state["last_status"].split(" · ")[0].endswith(("CET", "CEST"))
+
+
 def ago(days):
     return (datetime.now(UTC) - timedelta(days=days)).isoformat()
 

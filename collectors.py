@@ -5,6 +5,7 @@ import os
 import re
 import socket
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlparse
 
 import feedparser
@@ -30,6 +31,18 @@ def item(vendor, ident, title, url, text="", cvss=None, kev=False, published="")
         "kev": kev,
         "published": str(published or ""),
     }
+
+
+def parse_date(raw):
+    """A source's date (ISO 8601 or RFC 2822) as an aware datetime, or None if unreadable."""
+    raw = str(raw or "").strip()
+    for parse in (datetime.fromisoformat, parsedate_to_datetime):
+        try:
+            dt = parse(raw)
+        except (TypeError, ValueError, IndexError):
+            continue
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    return None
 
 
 def short_title(text, limit=200):

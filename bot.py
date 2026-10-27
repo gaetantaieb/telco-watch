@@ -3,11 +3,12 @@ import hashlib
 import html
 import logging
 import os
+import re
 import secrets
 import sys
 import time
 from datetime import UTC, datetime, timedelta
-from email.utils import parsedate_to_datetime
+from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Jsonb
 from telegram import (
@@ -54,6 +55,8 @@ TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ADMINS = {int(x) for x in os.environ.get("ADMIN_USER_IDS", "").split(",") if x}
 MIN_CVSS = float(os.environ.get("MIN_CVSS", "7.0"))  # default /severity of a new user
 LEVELS = {"critical": 9.0, "high": 7.0, "medium": 4.0, "low": 0.0}
+PARIS = ZoneInfo("Europe/Paris")  # dates are shown in CET, or CEST in summer
+DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}")
 PRIVATE = filters.ChatType.PRIVATE  # the bot only works in one-to-one chats
 PENDING = {}  # /addvendor proposals waiting for an admin's approval
 LAST_ASK = {}  # user id -> time of last /ask
@@ -92,6 +95,19 @@ def level_name(min_cvss):
     return next(name for name, score in LEVELS.items() if min_cvss >= score)
 
 
+def when(value):
+    """dd-mm-yyyy HH:MM in Paris time (CET or CEST); a date given without a time stays a date."""
+    if isinstance(value, str):
+        raw = value.strip()
+        if DATE_ONLY.fullmatch(raw):  # e.g. CISA KEV: no time, so none is made up
+            return datetime.fromisoformat(raw).strftime("%d-%m-%Y")
+        value = col.parse_date(raw)
+        if value is None:
+            return raw  # unreadable: shown as the source gave it
+    local = value.astimezone(PARIS)
+    return f"{local:%d-%m-%Y %H:%M} {local:%Z}"
+
+
 def fmt(it):
     e = html.escape
     score = f" · CVSS {it['cvss']}" if it["cvss"] is not None else ""
@@ -100,7 +116,7 @@ def fmt(it):
         f"<b>Vendor:</b> {e(it['vendor'])}\n"
         f"<b>Title:</b> {e(it['title'] or '')}\n"
         f"<b>CVE:</b> {e(', '.join(it['cves']) or '—')}\n"
-        f"<b>Published:</b> {e(it['published'] or '')}\n"
+        f"<b>Published:</b> {e(when(it['published'] or ''))}\n"
         f"{e(it['url'] or '')}"
     )
 
@@ -223,7 +239,7 @@ async def cycle(context: ContextTypes.DEFAULT_TYPE):
     db.set_state("last_run", started.isoformat())
     db.set_state(
         "last_status",
-        f"{started:%Y-%m-%d %H:%M} UTC · {len(new)} new · failed: {', '.join(failed) or 'none'}",
+        f"{when(started)} · {len(new)} new · failed: {', '.join(failed) or 'none'}",
     )
     if first_run:
         log.info("first run: backlog stored, nothing sent")
@@ -361,15 +377,8 @@ async def latest(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 
 def published_at(it):
-    """The vendor's publication time; formats differ by source, so fall back to collection time."""
-    raw = (it["published"] or "").strip()
-    for parse in (datetime.fromisoformat, parsedate_to_datetime):
-        try:
-            dt = parse(raw)
-        except (TypeError, ValueError, IndexError):
-            continue
-        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
-    return it["seen_at"]
+    """The vendor's publication time; falls back to collection time when the source has none."""
+    return col.parse_date(it["published"]) or it["seen_at"]
 
 
 def brief(it):
