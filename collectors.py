@@ -41,6 +41,14 @@ def rating_of(value):
     return word if word in ("critical", "high", "medium", "low") else None
 
 
+def vendor_score(text):
+    """A CVSS score, else a vendor rating, written in an advisory's text: (cvss, rating)."""
+    if m := CVSS_RE.search(text):
+        return float(m.group(1)), None
+    m = RATING_RE.search(text)
+    return None, rating_of(m and (m.group(1) or m.group(2)))
+
+
 def item(
     vendor,
     ident,
@@ -54,11 +62,9 @@ def item(
     rating=None,
 ):
     title = (title or "").strip()
-    if cvss is None and (m := CVSS_RE.search(f"{title} {text}")):
-        cvss = float(m.group(1))
-    if cvss is None and not rating_of(rating):
-        m = RATING_RE.search(f"{title} {text}")
-        rating = m and (m.group(1) or m.group(2))
+    if cvss is None:
+        cvss, found = vendor_score(f"{title} {text}")
+        rating = rating if rating_of(rating) else found  # a source's own field wins
     return {
         "vendor": vendor,
         "id": str(ident),
