@@ -67,10 +67,23 @@ def http():
 
 
 # ---------- scoring, formatting, storage ----------
+def level(it):
+    """The score the severity matrix uses: CVSS, else the vendor rating's lowest score."""
+    if it["cvss"] is not None:
+        return it["cvss"]
+    return LEVELS.get(it.get("rating"))
+
+
+def score_text(it):
+    if it["cvss"] is not None:
+        return f" · CVSS {it['cvss']}"
+    return " · vendor rating" if it.get("rating") else ""
+
+
 def severity(it):
     if it["kev"]:
         return "🔴 CRITICAL · ⚠️ KEV"
-    s = it["cvss"]
+    s = level(it)
     if s is None:
         return "🔵 ADVISORY"
     return (
@@ -88,7 +101,8 @@ def wants(user, it):
     """Does this user want this alert, given their /severity and /mute settings?"""
     if it["vendor"] in user["muted"]:
         return False
-    return it["kev"] or it["cvss"] is None or it["cvss"] >= user["min_cvss"]
+    s = level(it)
+    return it["kev"] or s is None or s >= user["min_cvss"]
 
 
 def level_name(min_cvss):
@@ -110,7 +124,7 @@ def when(value):
 
 def fmt(it):
     e = html.escape
-    score = f" · CVSS {it['cvss']}" if it["cvss"] is not None else ""
+    score = score_text(it)
     return (
         f"<b>{severity(it)}{score}</b>\n"
         f"<b>Vendor:</b> {e(it['vendor'])}\n"
@@ -124,7 +138,7 @@ def fmt(it):
 def update_line(it):
     """An old advisory collected only now because its source changed it: one line, not an alert."""
     e = html.escape
-    score = f" · CVSS {it['cvss']}" if it["cvss"] is not None else ""
+    score = score_text(it)
     cves = f" · {', '.join(it['cves'])}" if it["cves"] else ""
     published = f" · published {when(it['published'])}" if it["published"] else ""
     changed = when(it["updated_at"] or datetime.now(UTC))
@@ -141,8 +155,8 @@ def store(it):
     it["published_at"] = col.parse_date(it["published"]) or datetime.now(UTC)
     it["updated_at"] = col.parse_date(it.get("updated"))
     row = db.q(
-        "INSERT INTO items (key, vendor, title, url, cves, cvss, kev, published, "
-        "published_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+        "INSERT INTO items (key, vendor, title, url, cves, cvss, kev, published, rating, "
+        "published_at, updated_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
         "ON CONFLICT (key) DO NOTHING RETURNING key",
         (
             key,
@@ -153,6 +167,7 @@ def store(it):
             it["cvss"],
             it["kev"],
             it["published"],
+            it.get("rating"),
             it["published_at"],
             it["updated_at"],
         ),
@@ -415,7 +430,7 @@ def published_at(it):
 
 
 def brief(it):
-    score = f" · CVSS {it['cvss']}" if it["cvss"] is not None else ""
+    score = score_text(it)
     cves = f" · {', '.join(it['cves'])}" if it["cves"] else ""
     title = col.short_title(it["title"], 120)
     return f"{severity(it)}{score} · {it['vendor']}{cves}\n{title}\n{it['url'] or ''}"
@@ -435,14 +450,15 @@ def chunks(blocks, limit=4000):
 async def latest_all(u: Update, days, cap=40):
     """/latest all [days]: high and above from every vendor, by publication date."""
     rows = db.q(
-        "SELECT * FROM items WHERE (kev OR cvss >= %s OR cvss IS NULL) "
+        "SELECT * FROM items WHERE (kev OR cvss >= %s "
+        "OR (cvss IS NULL AND (rating IS NULL OR rating IN ('critical', 'high')))) "
         "AND published_at >= now() - %s * interval '1 day'",
         (LEVELS["high"], days),
     )
-    scored = [r for r in rows if r["kev"] or r["cvss"] is not None]
-    unscored = [r for r in rows if not r["kev"] and r["cvss"] is None]
+    scored = [r for r in rows if r["kev"] or level(r) is not None]
+    unscored = [r for r in rows if not r["kev"] and level(r) is None]
     scored.sort(
-        key=lambda r: (not r["kev"], -(r["cvss"] or 0), -r["published_at"].timestamp())
+        key=lambda r: (not r["kev"], -(level(r) or 0), -r["published_at"].timestamp())
     )
     unscored.sort(key=lambda r: -r["published_at"].timestamp())
     if not scored and not unscored:
@@ -454,7 +470,7 @@ async def latest_all(u: Update, days, cap=40):
     if len(scored) > cap:
         blocks.append(f"…and {len(scored) - cap} more: try a shorter period or /ask.")
     if unscored:
-        blocks.append(f"Vendor advisories without a CVSS score: {len(unscored)}")
+        blocks.append(f"Vendor advisories without a score or rating: {len(unscored)}")
         blocks += [brief(r) for r in unscored[: cap // 2]]
         if len(unscored) > cap // 2:
             blocks.append(f"…and {len(unscored) - cap // 2} more.")

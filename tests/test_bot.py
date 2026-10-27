@@ -98,6 +98,37 @@ def test_short_title_keeps_what_fits_and_summarises_the_rest():
     assert collectors.short_title(None) == ""
 
 
+@pytest.mark.parametrize(
+    "text, cvss, rating",
+    [
+        ("CVSS v3.1 Base Score: 9.8", 9.8, None),
+        ("CVSSv3 Score: 7.5", 7.5, None),
+        ("CVSS: 8.1 (High)", 8.1, None),
+        ('{"cvss_score": 10.0}', 10.0, None),
+        ("CVSS:3.1/AV:N/AC:L/PR:N", None, None),  # a vector, not a score
+        ("PAN-OS: DoS in DNS proxy (Severity: HIGH)", None, "high"),  # Palo Alto
+        ("Security Impact Rating: Critical", None, "critical"),  # Cisco
+        ('{"severity": "moderate"}', None, "medium"),  # JSON text
+        ("Important severity update", None, "high"),
+        ("A low-severity issue", None, "low"),
+        ("Highly available routers", None, None),
+        ("FortiOS heap overflow", None, None),
+    ],
+)
+def test_vendor_scores_and_ratings_are_read_from_the_text(text, cvss, rating):
+    it = collectors.item("X", "1", "t", "u", text)
+    assert (it["cvss"], it["rating"]) == (cvss, rating)
+
+
+def test_a_given_score_wins_over_the_text():
+    it = collectors.item("X", "1", "Severity: Low", "u", cvss=9.1)
+    assert (it["cvss"], it["rating"]) == (9.1, None)
+    assert collectors.item("X", "1", "Severity: Low", "u", rating="HIGH")["rating"] == (
+        "high"
+    )
+    assert collectors.item("X", "1", "t", "u", rating="n/a")["rating"] is None
+
+
 def test_unsafe_urls_are_refused():
     assert not collectors.safe_url("http://example.com/feed")  # not https
     assert not collectors.safe_url("https://postgres.railway.internal")  # internal host
@@ -123,6 +154,24 @@ def test_unscored_advisories_are_sent():
     assert bot.severity(item()) == "🔵 ADVISORY"
     assert bot.wants(user(), item())
     assert bot.wants(user(), item(kev=True, cvss=2.0))
+
+
+@pytest.mark.parametrize(
+    "rating, label, sent_at_high",
+    [
+        ("critical", "🔴 CRITICAL", True),
+        ("high", "🟠 HIGH", True),
+        ("medium", "🟡 MEDIUM", False),
+        ("low", "⚪ LOW", False),
+    ],
+)
+def test_vendor_ratings_use_the_severity_matrix(rating, label, sent_at_high):
+    it = item(rating=rating)
+    assert bot.severity(it) == label
+    assert bot.wants(user(), it) is sent_at_high  # /severity high
+    assert bot.wants(user(min_cvss=0.0), it)
+    assert f"<b>{label} · vendor rating</b>" in bot.fmt(it)
+    assert bot.wants(user(), item(rating="low", kev=True))  # KEV is always sent
 
 
 def test_muted_vendors_are_not_sent():
@@ -242,6 +291,15 @@ def test_fetch_json():
         it["url"] == "https://vendor.example/api"
     )  # no url field: falls back to the source
     assert it["cves"] == ["CVE-2026-3333"]
+
+
+def test_fetch_json_reads_the_severity_field():
+    payload = [{"ghsa_id": "GHSA-1", "summary": "Heap overflow", "level": "Moderate"}]
+    client = mock_client(lambda r: httpx.Response(200, json=payload))
+    cfg = {"id": "ghsa_id", "title": "summary", "severity": "level"}
+    src = {"vendor": "PHP", "type": "json", "url": "https://x.example/", "config": cfg}
+    [it] = run(collectors.fetch_json(client, src))
+    assert (it["cvss"], it["rating"]) == (None, "medium")
 
 
 HTML = """<table>
@@ -845,6 +903,13 @@ def test_latest_all_lists_high_and_above_by_publication_date(monkeypatch):
             seen_at=now,
         ),
         stored(
+            id="pan",
+            vendor="Palo Alto Networks",
+            rating="critical",
+            published=ago(1),
+            seen_at=now,
+        ),
+        stored(
             id="adv",
             vendor="Fortinet",
             title="FortiOS advisory",
@@ -857,10 +922,13 @@ def test_latest_all_lists_high_and_above_by_publication_date(monkeypatch):
     assert "kev OR cvss >= %s" in sql and params == (7.0, 5)
     assert "published_at >= now()" in sql  # an old item stored today is left out
     text = "\n\n".join(replies)
-    assert text.startswith("High and above, all vendors, last 5 days: 3")
-    # KEV first, then by score.
-    assert text.index("ZTE") < text.index("Cisco") < text.index("Nokia")
-    assert "without a CVSS score: 1" in text and "FortiOS advisory" in text
+    assert text.startswith("High and above, all vendors, last 5 days: 4")
+    assert "rating IN ('critical', 'high')" in sql
+    # KEV first, then by score; a vendor's critical rating counts as 9.0.
+    assert text.index("ZTE") < text.index("Cisco") < text.index("Palo Alto")
+    assert text.index("Palo Alto") < text.index("Nokia")
+    assert "🔴 CRITICAL · vendor rating · Palo Alto Networks" in text
+    assert "without a score or rating: 1" in text and "FortiOS advisory" in text
 
 
 def test_latest_all_defaults_to_7_days_and_caps_at_90(monkeypatch):
@@ -1023,6 +1091,14 @@ def test_alert_stats_groups(monkeypatch):
     llm.alert_stats("severity")
     assert calls[0][0].startswith("SELECT vendor AS grp") and calls[0][1] == [168]
     assert "CASE WHEN" in calls[1][0] and calls[1][1] == []
+
+
+def test_ask_counts_vendor_ratings_in_their_level(monkeypatch):
+    calls = []
+    monkeypatch.setattr(llm.db, "q_ro", lambda sql, p=(): calls.append((sql, p)) or [])
+    llm.search_alerts(min_cvss=7)
+    assert "COALESCE(cvss, CASE rating WHEN 'critical' THEN 9" in calls[0][0]
+    assert "rating" in llm.COLS and "rating" in llm.SEV
 
 
 def test_tools_match_functions():

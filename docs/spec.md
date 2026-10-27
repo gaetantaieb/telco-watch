@@ -57,8 +57,16 @@ outage is caught up on the next cycle.
 | CISA KEV catalogue (JSON) | Whole-word match of the vendor's `nvd_keyword` on the KEV vendor and product, so "PHP" matches PHP but not phpMyAdmin. Every KEV item is flagged as actively exploited. |
 | NVD API 2.0 | `virtualMatchString` with the vendor's `nvd_cpe` when it has one (e.g. `cpe:2.3:a:php:php`), else `keywordSearch` with its `nvd_keyword`; changes since the last cycle. CVSS is read from v4.0, else v3.1, else v3.0. The title is the English description, shortened (section 5.2). Throttled to the NVD rate limit. |
 | Vendor RSS/Atom | Every entry. |
-| Vendor JSON API | Configurable list path and field names (id, title, url, date, optional updated); at most 100 entries. |
+| Vendor JSON API | Configurable list path and field names (id, title, url, date, optional updated and severity); at most 100 entries. |
 | Vendor HTML page | CSS selectors for the advisory row, title and link; at most 50 rows. |
+
+**Vendor ratings.** When a source gives no CVSS score, the advisory's title and
+text are read for one, without an LLM: a CVSS score written in it ("CVSS v3.1
+Base Score: 9.8", not a vector string) becomes the item's CVSS; otherwise a
+vendor rating ("Severity: HIGH" in Palo Alto titles, "Security Impact Rating:
+Critical" at Cisco, "High severity", a JSON source's `severity` field) is stored
+as `rating`: critical, high, medium or low, with moderate read as medium and
+important as high.
 
 The seeded vendor feeds are Cisco PSIRT RSS, FortiGuard RSS and Palo Alto
 Networks RSS. The other seeded vendors are covered by KEV and NVD until an admin
@@ -77,7 +85,7 @@ is missing.
 |---|---|
 | `vendors` | name, `nvd_keyword`, optional `nvd_cpe`, enabled, added_at |
 | `sources` | vendor, type (`rss`, `json`, `html`), url, parsing config, enabled, approving admin (`added_by`), added_at |
-| `items` | key = sha256(vendor + advisory id), vendor, title, url, CVEs, CVSS, KEV flag, publication date as given by the source, `published_at` (parsed from it, else the collection time), `updated_at` (the source's last change: NVD `lastModified`, RSS/Atom `updated`, JSON `updated` field), `seen_at` |
+| `items` | key = sha256(vendor + advisory id), vendor, title, url, CVEs, CVSS, KEV flag, publication date as given by the source, vendor `rating` (when there is no CVSS), `published_at` (parsed from it, else the collection time), `updated_at` (the source's last change: NVD `lastModified`, RSS/Atom `updated`, JSON `updated` field), `seen_at` |
 | `users` | Telegram id, name, status (`pending`, `active`, `blocked`), `min_cvss`, muted vendors, approving admin, added_at |
 | `state` | `last_run`, `last_status` |
 
@@ -92,10 +100,12 @@ existed are backfilled at start-up.
 
 Each new item goes to every active user, unless:
 - its vendor is in the user's `/mute` list, or
-- it has a CVSS score below the user's `/severity` threshold.
+- its level is below the user's `/severity` threshold. The level is the CVSS
+  score, else the vendor rating at the lowest score of its band (critical 9.0,
+  high 7.0, medium 4.0, low 0).
 
-KEV items and items without a CVSS score (typically vendor advisories) are always
-sent to users who have not muted the vendor. A user who blocked the bot is logged
+KEV items and items with neither a score nor a rating are always sent to users
+who have not muted the vendor. A user who blocked the bot is logged
 and skipped. The bot pauses about 1 s between alerts (Telegram rate limit).
 
 ### 5.2 Format
@@ -112,11 +122,14 @@ https://…
 | Badge | Rule |
 |---|---|
 | 🔴 CRITICAL · ⚠️ KEV | in CISA KEV, whatever the score |
-| 🔴 CRITICAL | CVSS ≥ 9.0 |
-| 🟠 HIGH | 7.0 – 8.9 |
-| 🟡 MEDIUM | 4.0 – 6.9 |
-| ⚪ LOW | < 4.0 |
-| 🔵 ADVISORY | no CVSS score |
+| 🔴 CRITICAL | CVSS ≥ 9.0, or vendor rating critical |
+| 🟠 HIGH | 7.0 – 8.9, or vendor rating high |
+| 🟡 MEDIUM | 4.0 – 6.9, or vendor rating medium |
+| ⚪ LOW | < 4.0, or vendor rating low |
+| 🔵 ADVISORY | neither a CVSS score nor a vendor rating |
+
+A badge set by a vendor rating reads "· vendor rating" where a score would show
+"· CVSS 9.8".
 
 An item published more than a day before the previous cycle is an old advisory
 that its source has just changed (typically an NVD re-analysis of an old CVE),
@@ -170,7 +183,7 @@ commands, and each admin's chat also lists the admin ones.
 | `/start`, `/help` | Access request (section 6), or the command list for active users; admins also see the admin commands. |
 | `/status`, `/health` | "<dd-mm-yyyy HH:MM CET> · N new · failed: …" for the last cycle (Paris time, section 5.2). |
 | `/latest [vendor] [n]` | Last *n* stored items (default 5, max 20), newest first by publication date, optionally for vendors matching *vendor*. Any severity; personal settings do not apply. |
-| `/latest all [days]` | Every item with CVSS ≥ 7 or in KEV, from all vendors, **published** in the last *days* (default 7, max 90), by `published_at`: an old advisory collected recently because its source changed it is left out. KEV first, then by score; unscored vendor advisories in a separate section. One compact list (titles shortened, section 5.2), split under Telegram's limit, capped at 40 (+20 unscored). Mutes do not apply. |
+| `/latest all [days]` | Every item with CVSS ≥ 7, a critical or high vendor rating, or in KEV, from all vendors, **published** in the last *days* (default 7, max 90), by `published_at`: an old advisory collected recently because its source changed it is left out. KEV first, then by level; advisories with neither a score nor a rating in a separate section. One compact list (titles shortened, section 5.2), split under Telegram's limit, capped at 40 (+20 unscored). Mutes do not apply. |
 | `/vendors` | Each vendor, enabled or paused, with its number of own sources (+ KEV/NVD). |
 | `/ask <question>` | Plain-language answer about the stored alerts (section 7.3). One question every 10 s per user, 500 characters max. |
 | `/severity <critical\|high\|medium\|low>` | Sets the user's threshold to 9.0, 7.0, 4.0 or 0. Without an argument, shows the current one. New users start at `MIN_CVSS`. |
@@ -193,8 +206,8 @@ SQL and never sees the database directly:
 
 | Tool | Query |
 |---|---|
-| `search_alerts` | vendor, last N hours, minimum CVSS (KEV always included), KEV only, CVE, word in the title; at most 25 results, most critical first |
-| `alert_stats` | count by vendor or by severity, optionally over the last N hours |
+| `search_alerts` | vendor, last N hours, minimum CVSS (a vendor rating counts at its level's score; KEV always included), KEV only, CVE, word in the title; at most 25 results, most critical first |
+| `alert_stats` | count by vendor or by severity (vendor ratings included), optionally over the last N hours |
 | `list_vendors` | vendors and whether each is enabled |
 
 Queries are parameterised and run on the read-only connection (`DATABASE_URL_RO`,
@@ -233,7 +246,7 @@ From the original design ([specs.pdf](specs.pdf)):
 | Watch-list (F6) | `/watch`, `/unwatch`, "IN OUR NETWORK" tag | Not built; `/mute` is the only per-vendor filter |
 | Daily digest (F7) | Medium and Low grouped in an 08:00 digest, `/digest` | No digest; `/severity` decides what is sent immediately, and `/latest all` gives a summary on demand |
 | Source health (F10) | Warn after 3 failed cycles in a row | Admins are told after every failing cycle |
-| Alert format (1.4) | Advisory id, affected products, vendor rating (Cisco SIR, Juniper severity) | Not extracted |
+| Alert format (1.4) | Advisory id, affected products, vendor rating (Cisco SIR, Juniper severity) | The vendor rating is read when there is no CVSS (section 3.2); advisory id and affected products are not extracted |
 | Regional sources | CERT-FR, CISA advisories, ENISA EUVD | Not collected |
 | Cisco openVuln API | OAuth2 JSON source with SIR | Cisco is collected through its public RSS feed |
 | Retention | 12 months of items, 90 days of logs | Manual: see the run book in the README |

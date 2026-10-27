@@ -51,3 +51,7 @@ ALTER TABLE vendors ADD COLUMN IF NOT EXISTS nvd_cpe TEXT;     -- e.g. cpe:2.3:a
 ALTER TABLE items ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ; -- else seen_at
 ALTER TABLE items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;   -- if the source gives it
 CREATE INDEX IF NOT EXISTS items_published_at ON items (published_at DESC);
+
+-- The vendor's own rating (critical, high, medium, low) when the advisory has no CVSS
+-- score; it is placed in the severity matrix at the lowest score of its level.
+ALTER TABLE items ADD COLUMN IF NOT EXISTS rating TEXT;

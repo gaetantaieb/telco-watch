@@ -17,12 +17,48 @@ UA = {"User-Agent": "telco-watch-bot/1.0"}
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 NVD_KEY = os.environ.get("NVD_API_KEY")
+# The vendor's own rating, read from the advisory text when the source gives no score:
+# "CVSS v3.1 Base Score: 9.8", "(Severity: HIGH)", "Security Impact Rating: Critical".
+# A vector string ("CVSS:3.1/AV:N/...") is not a score.
+CVSS_RE = re.compile(
+    r"CVSS(?:\s?v?[234](?:\.\d)?)?[\s\"':=_]*(?:base\s*)?(?:score)?[\s\"':=]*"
+    r"(10(?:\.0)?|\d\.\d)(?![\d/.])",
+    re.IGNORECASE,
+)
+LEVEL_WORDS = r"(critical|high|important|medium|moderate|low)"
+RATING_RE = re.compile(
+    rf"(?:severity|impact rating|\bSIR)[\s\"':=(]*{LEVEL_WORDS}\b"
+    rf"|\b{LEVEL_WORDS}[\s-]+severity\b",  # "High severity" or "high-severity"
+    re.IGNORECASE,
+)
+RATINGS = {"important": "high", "moderate": "medium"}  # other words are already levels
+
+
+def rating_of(value):
+    """A vendor rating word as one of the severity levels, or None."""
+    word = str(value or "").strip().lower()
+    word = RATINGS.get(word, word)
+    return word if word in ("critical", "high", "medium", "low") else None
 
 
 def item(
-    vendor, ident, title, url, text="", cvss=None, kev=False, published="", updated=""
+    vendor,
+    ident,
+    title,
+    url,
+    text="",
+    cvss=None,
+    kev=False,
+    published="",
+    updated="",
+    rating=None,
 ):
     title = (title or "").strip()
+    if cvss is None and (m := CVSS_RE.search(f"{title} {text}")):
+        cvss = float(m.group(1))
+    if cvss is None and not rating_of(rating):
+        m = RATING_RE.search(f"{title} {text}")
+        rating = m and (m.group(1) or m.group(2))
     return {
         "vendor": vendor,
         "id": str(ident),
@@ -33,6 +69,7 @@ def item(
         "kev": kev,
         "published": str(published or ""),
         "updated": str(updated or ""),  # the source's last change, when it gives one
+        "rating": None if cvss is not None else rating_of(rating),
     }
 
 
@@ -99,16 +136,17 @@ async def fetch_rss(client, src):
             e.get("link", ""),
             e.get("summary", ""),
             published=e.get("published"),
-            updated=dict.get(
-                e, "updated"
-            ),  # e.get would warn and fall back to published
+            # e.get("updated") would warn, then fall back to the published date
+            updated=dict.get(e, "updated"),
         )
         for e in feedparser.parse(r.text).entries
     ]
 
 
 async def fetch_json(client, src):
-    cfg = src["config"]  # {"list": "a.b", "id", "title", "url", "date", "updated"}
+    cfg = src[
+        "config"
+    ]  # {"list": "a.b", "id", "title", "url", "date", "updated", "severity"}
     r = await client.get(src["url"])
     r.raise_for_status()
     data = r.json()
@@ -123,6 +161,7 @@ async def fetch_json(client, src):
             json.dumps(d)[:2000],
             published=d.get(cfg.get("date", "")),
             updated=d.get(cfg.get("updated", "")),
+            rating=d.get(cfg.get("severity", "")),
         )
         for d in data[:100]
     ]
