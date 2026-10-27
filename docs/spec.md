@@ -53,7 +53,7 @@ outage is caught up on the next cycle.
 | Source | How it is matched |
 |---|---|
 | CISA KEV catalogue (JSON) | Whole-word match of the vendor's `nvd_keyword` on the KEV vendor and product, so "PHP" matches PHP but not phpMyAdmin. Every KEV item is flagged as actively exploited. |
-| NVD API 2.0 | `virtualMatchString` with the vendor's `nvd_cpe` when it has one (e.g. `cpe:2.3:a:php:php`), else `keywordSearch` with its `nvd_keyword`; changes since the last cycle. CVSS is read from v4.0, else v3.1, else v3.0. Throttled to the NVD rate limit. |
+| NVD API 2.0 | `virtualMatchString` with the vendor's `nvd_cpe` when it has one (e.g. `cpe:2.3:a:php:php`), else `keywordSearch` with its `nvd_keyword`; changes since the last cycle. CVSS is read from v4.0, else v3.1, else v3.0. The title is the English description, shortened (section 5.2). Throttled to the NVD rate limit. |
 | Vendor RSS/Atom | Every entry. |
 | Vendor JSON API | Configurable list path and field names (id, title, url, date); at most 100 entries. |
 | Vendor HTML page | CSS selectors for the advisory row, title and link; at most 50 rows. |
@@ -114,6 +114,10 @@ https://…
 | ⚪ LOW | < 4.0 |
 | 🔵 ADVISORY | no CVSS score |
 
+Long titles are shortened without an LLM: a title that fits is kept as is,
+else its first sentence is used, cut at the last whole word with "…" if it is
+still too long (200 characters for NVD titles, 120 in compact lists).
+
 ## 6. Users and access
 
 The bot only works in private chats; it ignores groups.
@@ -147,7 +151,7 @@ commands, and each admin's chat also lists the admin ones.
 | `/start`, `/help` | Access request (section 6), or the command list for active users; admins also see the admin commands. |
 | `/status`, `/health` | "<time> UTC · N new · failed: …" for the last cycle. |
 | `/latest [vendor] [n]` | Last *n* stored items (default 5, max 20), newest first by collection time, optionally for vendors matching *vendor*. Any severity; personal settings do not apply. |
-| `/latest all [days]` | Every item with CVSS ≥ 7 or in KEV, from all vendors, **published** in the last *days* (default 7, max 90). Publication dates are parsed from each source's format (ISO, RFC 2822) and fall back to the collection time. KEV first, then by score; unscored vendor advisories in a separate section. One compact list, split under Telegram's limit, capped at 40 (+20 unscored). Mutes do not apply. |
+| `/latest all [days]` | Every item with CVSS ≥ 7 or in KEV, from all vendors, **published** in the last *days* (default 7, max 90). Publication dates are parsed from each source's format (ISO, RFC 2822) and fall back to the collection time. KEV first, then by score; unscored vendor advisories in a separate section. One compact list (titles shortened, section 5.2), split under Telegram's limit, capped at 40 (+20 unscored). Mutes do not apply. |
 | `/vendors` | Each vendor, enabled or paused, with its number of own sources (+ KEV/NVD). |
 | `/ask <question>` | Plain-language answer about the stored alerts (section 7.3). One question every 10 s per user, 500 characters max. |
 | `/severity <critical\|high\|medium\|low>` | Sets the user's threshold to 9.0, 7.0, 4.0 or 0. Without an argument, shows the current one. New users start at `MIN_CVSS`. |

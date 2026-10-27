@@ -375,7 +375,7 @@ def published_at(it):
 def brief(it):
     score = f" · CVSS {it['cvss']}" if it["cvss"] is not None else ""
     cves = f" · {', '.join(it['cves'])}" if it["cves"] else ""
-    title = (it["title"] or "")[:100]
+    title = col.short_title(it["title"], 120)
     return f"{severity(it)}{score} · {it['vendor']}{cves}\n{title}\n{it['url'] or ''}"
 
 

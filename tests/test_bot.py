@@ -81,6 +81,23 @@ def test_cves_are_extracted():
     assert it["cves"] == ["CVE-2026-12345"]
 
 
+LONG = (
+    "A vulnerability in the web-based management interface of Cisco IOS XR Software "
+    "could allow an unauthenticated, remote attacker to execute arbitrary commands. "
+    "This vulnerability is due to insufficient validation of user-supplied input."
+)
+
+
+def test_short_title_keeps_what_fits_and_summarises_the_rest():
+    assert collectors.short_title("IOS XR flaw.  Fixed.") == "IOS XR flaw. Fixed."
+    assert collectors.short_title(LONG) == LONG.split(". ")[0] + "."
+    cut = collectors.short_title(LONG, 60)
+    assert len(cut) <= 60 and cut.endswith("…") and LONG.startswith(cut[:-1])
+    assert not cut[:-1].endswith(" ")
+    assert collectors.short_title("x" * 300, 50) == "x" * 49 + "…"  # no space at all
+    assert collectors.short_title(None) == ""
+
+
 def test_unsafe_urls_are_refused():
     assert not collectors.safe_url("http://example.com/feed")  # not https
     assert not collectors.safe_url("https://postgres.railway.internal")  # internal host
@@ -770,6 +787,12 @@ def test_brief_names_the_cves_or_nothing():
         "🔴 CRITICAL · CVSS 9.8 · Cisco · CVE-2026-1\n"
     )
     assert bot.brief(item()).startswith("🔵 ADVISORY · Cisco\n")
+
+
+def test_brief_shortens_long_titles_at_a_word():
+    title = bot.brief(item(title=LONG)).split("\n")[1]
+    assert len(title) <= 120 and title.endswith("…")
+    assert LONG.startswith(title[:-1]) and LONG[len(title) - 1] == " "  # whole words
 
 
 def test_latest_with_a_vendor_still_works(monkeypatch):

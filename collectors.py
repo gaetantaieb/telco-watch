@@ -32,6 +32,20 @@ def item(vendor, ident, title, url, text="", cvss=None, kev=False, published="")
     }
 
 
+def short_title(text, limit=200):
+    """Text that fits is kept; else its first sentence, cut at a word when still too long."""
+    text = " ".join((text or "").split())
+    if len(text) <= limit:
+        return text
+    first = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
+    if 40 <= len(first) <= limit:  # a very short "sentence" is likely an abbreviation
+        return first
+    cut = text[: limit - 1]
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut.rstrip(" ,;:-") + "…"
+
+
 def safe_url(url):
     """Only public https URLs: blocks Railway-internal hosts and private addresses."""
     p = urlparse(url or "")
@@ -182,7 +196,7 @@ async def fetch_nvd(client, vendors, since):
                 item(
                     v["name"],
                     c["id"],
-                    desc[:200],
+                    short_title(desc),
                     f"https://nvd.nist.gov/vuln/detail/{c['id']}",
                     c["id"],
                     cvss=score,
