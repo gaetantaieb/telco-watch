@@ -434,18 +434,28 @@ def test_fetch_nvd_reads_best_cvss_and_queries_since(monkeypatch):
 class FakeDB:
     """In-memory stand-in for db.py, enough for store() and cycle()."""
 
-    def __init__(self, state=None):
+    def __init__(self, state=None, vendors=None):
         self.state = dict(state or {})
-        self.keys = set()
+        self.cves = {}  # key -> CVEs of each stored item
+        old = datetime(2026, 1, 1, tzinfo=UTC)
+        self.vendors = vendors or [dict(v, added_at=old) for v in VENDORS]
+
+    @property
+    def keys(self):
+        return set(self.cves)
 
     def q(self, sql, params=(), one=False):
         if sql.startswith("INSERT INTO items"):
-            if params[0] in self.keys:
+            if params[0] in self.cves:
                 return None
-            self.keys.add(params[0])
+            self.cves[params[0]] = params[4]
             return {"key": params[0]}
+        if "unnest(cves)" in sql:
+            key, cves = params
+            seen = {c for k, cs in self.cves.items() if k != key for c in cs}
+            return [{"cve": c} for c in seen & set(cves)]
         if "FROM vendors" in sql and "JOIN" not in sql:
-            return VENDORS
+            return self.vendors
         return []
 
     def get_state(self, k):
@@ -477,11 +487,11 @@ class FakeBot:
         self.menus[scope.chat_id] = None
 
 
-def run_cycle(monkeypatch, fake_db, kev_items, nvd_error=None, users=None):
+def run_cycle(monkeypatch, fake_db, kev_items, nvd_error=None, users=None, nvd=None):
     async def kev(client, vendors):
         return kev_items
 
-    async def nvd(client, vendors, since):
+    async def no_nvd(client, vendors, since):
         if nvd_error:
             raise nvd_error
         return []
@@ -492,7 +502,7 @@ def run_cycle(monkeypatch, fake_db, kev_items, nvd_error=None, users=None):
     monkeypatch.setattr(bot, "db", fake_db)
     monkeypatch.setattr(bot, "active_users", lambda: users or [])
     monkeypatch.setattr(bot.col, "fetch_kev", kev)
-    monkeypatch.setattr(bot.col, "fetch_nvd", nvd)
+    monkeypatch.setattr(bot.col, "fetch_nvd", nvd or no_nvd)
     monkeypatch.setattr(bot.asyncio, "sleep", no_sleep)
     monkeypatch.setattr(bot, "http", lambda: mock_client(lambda r: httpx.Response(200)))
     fake_bot = FakeBot()
@@ -520,13 +530,10 @@ def test_new_items_are_sent_once_and_failures_reported(monkeypatch):
     sent = run_cycle(
         monkeypatch, fake_db, items, nvd_error=RuntimeError("down"), users=users
     )
-    alerts = [
-        (chat, "KEV" in text) for chat, text in sent if "Sources failed" not in text
-    ]
+    alerts = [(chat, "KEV" in text) for chat, text in sent]
     # KEV goes to 1 and 2 (3 muted Cisco); the low one only to 2 (/severity low).
+    # One failed cycle is not worth a warning (issue #25).
     assert alerts == [(1, True), (2, True), (2, False)]
-    # Only admins hear about failing sources.
-    assert [chat for chat, text in sent if "Sources failed" in text] == [1]
     assert "failed: NVD" in fake_db.state["last_status"]
     # The same advisory is never sent twice.
     assert run_cycle(monkeypatch, fake_db, items, users=users) == []
@@ -559,6 +566,131 @@ def test_update_lines_still_follow_the_user_settings(monkeypatch):
     fake_db = FakeDB({"last_run": (datetime.now(UTC) - timedelta(hours=1)).isoformat()})
     old = [item(id="o", cvss=5.0, published="2019-03-12")]
     assert run_cycle(monkeypatch, fake_db, old, users=[user()]) == []  # below /severity
+
+
+def test_a_cve_already_alerted_from_another_source_is_an_update(monkeypatch):
+    fake_db = FakeDB({"last_run": (datetime.now(UTC) - timedelta(hours=1)).isoformat()})
+    advisory = item(id="cisco-sa", cvss=10.0, cves=["CVE-2026-1"], published=ago(1))
+    run_cycle(monkeypatch, fake_db, [advisory], users=[user()])
+    kev = item(
+        id="KEV-CVE-2026-1",
+        kev=True,
+        cves=["CVE-2026-1"],
+        title="Cisco Catalyst SD-WAN Controller Authentication Bypass Vulnerability",
+        published=datetime.now(UTC).date().isoformat(),
+    )
+    partly_new = item(id="nvd", cvss=9.8, cves=["CVE-2026-1", "CVE-2026-2"])
+    sent = [
+        t for _, t in run_cycle(monkeypatch, fake_db, [kev, partly_new], users=[user()])
+    ]
+    assert sent[0].startswith(
+        "🔄 <b>Update</b> · 🔴 CRITICAL · ⚠️ KEV · now actively exploited (CISA KEV) · "
+        "Cisco · CVE-2026-1 · Cisco Catalyst SD-WAN"
+    )
+    assert sent[1].startswith("<b>🔴 CRITICAL")  # CVE-2026-2 is new: a full alert
+
+
+def test_the_same_cve_from_two_sources_in_one_cycle_is_one_alert(monkeypatch):
+    fake_db = FakeDB({"last_run": (datetime.now(UTC) - timedelta(hours=1)).isoformat()})
+    items = [
+        item(id="cisco-sa", cvss=9.8, cves=["CVE-2026-3"]),
+        item(id="CVE-2026-3", cvss=9.8, cves=["CVE-2026-3"]),
+        item(id="no-cve", cvss=9.8),
+    ]
+    sent = [t for _, t in run_cycle(monkeypatch, fake_db, items, users=[user()])]
+    assert [t.startswith("🔄") for t in sent] == [False, True, False]
+    assert "now actively exploited" not in sent[1]
+
+
+def nvd_calls(errors):
+    """A fake fetch_nvd raising the given errors in turn, then succeeding; records since."""
+    calls = []
+
+    async def nvd(client, vendors, since):
+        calls.append(since)
+        if len(calls) <= len(errors):
+            raise errors[len(calls) - 1]
+        return []
+
+    return nvd, calls
+
+
+def status_error(code):
+    request = httpx.Request("GET", collectors.NVD_URL)
+    return httpx.HTTPStatusError(
+        str(code), request=request, response=httpx.Response(code, request=request)
+    )
+
+
+def test_nvd_window_is_kept_until_nvd_answers(monkeypatch):
+    first = "2026-10-29T23:04:30+00:00"
+    fake_db = FakeDB({"last_run": first})
+    nvd, calls = nvd_calls([status_error(503), status_error(503)])  # retry fails too
+    run_cycle(monkeypatch, fake_db, [], nvd=nvd)
+    assert len(calls) == 2 and "failed: NVD" in fake_db.state["last_status"]
+    assert fake_db.state["nvd_since"] == first
+    # Next cycle: NVD is asked for everything since the last success, then moves on.
+    run_cycle(monkeypatch, fake_db, [], nvd=nvd)
+    assert calls[2] == datetime.fromisoformat(first)
+    assert fake_db.state["nvd_since"] == fake_db.state["last_run"]
+
+
+def test_nvd_is_retried_once_after_a_server_error_or_timeout(monkeypatch):
+    for error in (status_error(503), httpx.ReadTimeout("")):
+        fake_db = FakeDB({"last_run": "2026-10-29T23:04:30+00:00"})
+        nvd, calls = nvd_calls([error])
+        run_cycle(monkeypatch, fake_db, [], nvd=nvd)
+        assert len(calls) == 2 and "failed: none" in fake_db.state["last_status"]
+    fake_db = FakeDB({"last_run": "2026-10-29T23:04:30+00:00"})
+    nvd, calls = nvd_calls([status_error(403)])  # e.g. rate limit: not retried at once
+    run_cycle(monkeypatch, fake_db, [], nvd=nvd)
+    assert len(calls) == 1
+
+
+def test_an_error_without_text_is_logged_by_its_type(monkeypatch, caplog):
+    fake_db = FakeDB({"last_run": "2026-10-29T23:04:30+00:00"})
+    with caplog.at_level(logging.WARNING, logger="telco-watch"):
+        run_cycle(monkeypatch, fake_db, [], nvd_error=RuntimeError())
+    assert "source NVD failed: RuntimeError" in caplog.text
+
+
+def test_admins_are_warned_after_three_failed_cycles_and_told_of_recovery(monkeypatch):
+    monkeypatch.setattr(bot, "ADMINS", {1})
+    users = [user(chat_id=1), user(chat_id=2)]
+    fake_db = FakeDB({"last_run": "2026-10-29T23:04:30+00:00"})
+    notices = []
+    for _ in range(4):  # warned once, on the 3rd failure only
+        notices += run_cycle(monkeypatch, fake_db, [], RuntimeError("down"), users)
+    warning = (
+        "⚠️ Failing for 3 cycles in a row: NVD. "
+        "What they missed is collected once they work again."
+    )
+    assert notices == [(1, warning)]
+    assert run_cycle(monkeypatch, fake_db, [], users=users) == [
+        (1, "✅ Working again: NVD")
+    ]
+    assert run_cycle(monkeypatch, fake_db, [], users=users) == []
+
+
+def test_existing_advisories_of_a_vendor_added_since_the_last_cycle_are_silent(
+    monkeypatch,
+):
+    last = datetime.now(UTC) - timedelta(hours=1)
+    vendors = [
+        {"name": "Cisco", "nvd_keyword": "Cisco", "added_at": last - timedelta(days=9)},
+        {
+            "name": "Microsoft",
+            "nvd_keyword": "Microsoft",
+            "added_at": datetime.now(UTC),
+        },
+    ]
+    fake_db = FakeDB({"last_run": last.isoformat()}, vendors=vendors)
+    items = [
+        item(id="KEV-1", vendor="Microsoft", kev=True, cves=["CVE-2020-1"]),
+        item(id="KEV-2", kev=True, cves=["CVE-2026-9"]),
+    ]
+    sent = run_cycle(monkeypatch, fake_db, items, users=[user()])
+    assert len(fake_db.keys) == 2 and len(sent) == 1 and "CVE-2026-9" in sent[0][1]
 
 
 def test_store_keeps_the_parsed_dates(monkeypatch):
@@ -1105,10 +1237,12 @@ def test_promoted_admins_get_requests_and_failure_notices(monkeypatch):
     c = ctx()
     run(bot.start(update(9, "Eve"), c))
     assert sorted(chat for chat, _ in c.bot.sent) == [7, 42]
-    fake_db = FakeDB({"last_run": "2026-10-22T08:00:00+00:00"})
+    fake_db = FakeDB(
+        {"last_run": "2026-10-22T08:00:00+00:00", "failures": '{"NVD": 2}'}
+    )
     users = [user(chat_id=7, role="admin"), user(chat_id=8)]
     sent = run_cycle(monkeypatch, fake_db, [], nvd_error=RuntimeError("x"), users=users)
-    assert [chat for chat, text in sent if "Sources failed" in text] == [7]
+    assert [chat for chat, text in sent if "Failing" in text] == [7]
 
 
 def test_removing_a_promoted_admin_takes_the_role_and_menu(monkeypatch):
@@ -1467,8 +1601,72 @@ def test_start_up_sets_the_menu_then_announces(monkeypatch):
 def test_seed_lists_all_vendors_of_section_2_2():
     seed = yaml.safe_load((ROOT / "seed.yaml").read_text())
     names = [v["name"] for v in seed["vendors"]]
-    assert len(names) == 29 and len(set(names)) == 29
+    assert len(names) == 49 and len(set(names)) == 49
     for s in seed["sources"]:
         assert s["vendor"] in names
         assert s["type"] in collectors.FETCHERS
         assert s["url"].startswith("https://")
+
+
+def test_seed_vendors_missing_by_name_are_added_at_every_start(monkeypatch):
+    monkeypatch.chdir(ROOT)
+    existing = {"Cisco", "Palo Alto Networks", "Microsoft"}  # Microsoft removed or not
+    calls = []
+
+    def q(sql, params=(), one=False):
+        calls.append((sql, params))
+        if sql.startswith("INSERT INTO vendors"):
+            return None if params[0] in existing else {"name": params[0]}
+        return None
+
+    monkeypatch.setattr(bot.db, "q", q)
+    added = bot.db.load_seed()
+    assert "Cisco" not in added and "Microsoft" not in added
+    assert {"Metaswitch", "PHP", "Linux Kernel", "Jenkins", "Fortinet"} <= set(added)
+    sources = [p[0] for sql, p in calls if sql.startswith("INSERT INTO sources")]
+    assert sources == ["Fortinet"]  # Cisco and Palo Alto already have theirs
+    # The old Metaswitch-only "Microsoft" now covers Microsoft, as a fresh vendor.
+    sql, params = calls[0]
+    assert "added_at = now()" in sql
+    assert params == ("Microsoft", "cpe:2.3:*:microsoft", "Microsoft", "Metaswitch")
+
+
+def test_it_vendors_are_matched_precisely_in_nvd():
+    seed = {
+        v["name"]: v
+        for v in yaml.safe_load((ROOT / "seed.yaml").read_text())["vendors"]
+    }
+    for name in ("Python", "Java", "Linux Kernel", "Microsoft", "Oracle", "GitHub"):
+        assert seed[name]["nvd_cpe"].startswith("cpe:2.3:"), name
+
+
+def test_fetch_nvd_skips_a_vendor_whose_query_is_rejected(monkeypatch, caplog):
+    async def no_sleep(s):
+        return None
+
+    monkeypatch.setattr(collectors.asyncio, "sleep", no_sleep)
+
+    def handler(request):
+        if request.url.params.get("virtualMatchString"):
+            return httpx.Response(404)
+        entry = {
+            "cve": {
+                "id": "CVE-2026-5",
+                "published": "2026-10-29T10:00:00.000",
+                "descriptions": [{"lang": "en", "value": "Cisco flaw"}],
+            }
+        }
+        return httpx.Response(200, json={"vulnerabilities": [entry]})
+
+    vendors = [
+        {"name": "Bad", "nvd_keyword": "Bad", "nvd_cpe": "cpe:2.3:a:bad"},
+        {"name": "Cisco", "nvd_keyword": "Cisco", "nvd_cpe": None},
+    ]
+    since = datetime(2026, 10, 29, tzinfo=UTC)
+    with caplog.at_level(logging.WARNING, logger="telco-watch"):
+        out = run(collectors.fetch_nvd(mock_client(handler), vendors, since))
+    assert [it["id"] for it in out] == ["CVE-2026-5"]
+    assert "NVD query rejected for Bad: 404" in caplog.text
+    down = mock_client(lambda r: httpx.Response(503))
+    with pytest.raises(httpx.HTTPStatusError):  # a server error still fails NVD
+        run(collectors.fetch_nvd(down, vendors[1:], since))

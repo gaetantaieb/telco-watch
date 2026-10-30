@@ -6,6 +6,13 @@
 # so development users only see an entry's first text. 4 lines at most: longer notes
 # are cut, and a test fails.
 
+- version: "2026-10-30"
+  notes: |
+    🆕 New in Telco Vendor Watch:
+    • IT coverage: PHP, Python, Java, Node.js, Kubernetes, Linux, Microsoft, Oracle, PostgreSQL, GitLab, Jenkins… (/vendors, /mute).
+    • A CVE already alerted from another source (e.g. added to CISA KEV later) comes as a 🔄 Update.
+    • Admins are warned about a failing source only after 3 failed cycles in a row.
+
 - version: "2026-10-27"
   notes: |
     🆕 New in Telco Vendor Watch:

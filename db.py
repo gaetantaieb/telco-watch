@@ -76,21 +76,41 @@ def init():
         conn.execute(f.read())
     ensure_ro_role()
     ro_pool.open()  # after the role exists, so its first connections succeed
-    if q("SELECT 1 FROM vendors LIMIT 1", one=True):
-        return  # already seeded
+    return load_seed()
+
+
+def load_seed():
+    """Add the seed.yaml vendors missing by name, with their sources; return their names.
+
+    Runs at every start, so vendors added to the file reach an existing database. A vendor
+    removed with /removevendor keeps its disabled row, so it is not brought back.
+    """
     with open("seed.yaml") as f:
         seed = yaml.safe_load(f)
+    # "Microsoft" first stood for Metaswitch only; it now covers all Microsoft products
+    # (Metaswitch has its own entry). added_at = now(): its KEV backlog is stored silently.
+    q(
+        "UPDATE vendors SET nvd_keyword = %s, nvd_cpe = %s, added_at = now() "
+        "WHERE name = %s AND nvd_keyword = %s",
+        ("Microsoft", "cpe:2.3:*:microsoft", "Microsoft", "Metaswitch"),
+    )
+    added = []
     for v in seed["vendors"]:
-        q(
+        row = q(
             "INSERT INTO vendors (name, nvd_keyword, nvd_cpe) VALUES (%s, %s, %s) "
-            "ON CONFLICT DO NOTHING",
+            "ON CONFLICT DO NOTHING RETURNING name",
             (v["name"], v.get("nvd_keyword", v["name"]), v.get("nvd_cpe")),
+            one=True,
         )
+        if row:
+            added.append(row["name"])
     for s in seed["sources"]:
-        q(
-            "INSERT INTO sources (vendor, type, url, config) VALUES (%s, %s, %s, %s)",
-            (s["vendor"], s["type"], s["url"], Jsonb(s.get("config", {}))),
-        )
+        if s["vendor"] in added:
+            q(
+                "INSERT INTO sources (vendor, type, url, config) VALUES (%s, %s, %s, %s)",
+                (s["vendor"], s["type"], s["url"], Jsonb(s.get("config", {}))),
+            )
+    return added
 
 
 def get_state(k):
