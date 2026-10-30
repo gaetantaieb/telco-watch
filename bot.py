@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import html
+import json
 import logging
 import os
 import re
@@ -10,6 +11,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import httpx
 import yaml
 from psycopg.types.json import Jsonb
 from telegram import (
@@ -62,6 +64,8 @@ DATE_ONLY = re.compile(r"\d{4}-\d{2}-\d{2}")
 PRIVATE = filters.ChatType.PRIVATE  # the bot only works in one-to-one chats
 PENDING = {}  # /addvendor proposals waiting for an admin's approval
 LAST_ASK = {}  # user id -> time of last /ask
+NVD_RETRY = 30  # seconds before NVD is asked again after a server error or timeout
+WARN_AFTER = 3  # failed cycles in a row before admins hear about a source
 
 
 def http():
@@ -144,8 +148,9 @@ def update_line(it):
     cves = f" · {', '.join(it['cves'])}" if it["cves"] else ""
     published = f" · published {when(it['published'])}" if it["published"] else ""
     changed = when(it["updated_at"] or datetime.now(UTC))
+    kev = " · now actively exploited (CISA KEV)" if it["kev"] else ""
     return (
-        f"🔄 <b>Update</b> · {severity(it)}{score} · {e(it['vendor'] + cves)} · "
+        f"🔄 <b>Update</b> · {severity(it)}{score}{kev} · {e(it['vendor'] + cves)} · "
         f"{e(col.short_title(it['title'], 120))}{e(published)} · last updated {changed}\n"
         f"{e(it['url'] or '')}"
     )
@@ -175,7 +180,20 @@ def store(it):
         ),
         one=True,
     )
-    return row is not None
+    if row is None:
+        return False
+    # All its CVEs came earlier from another source (vendor advisory, NVD, KEV).
+    known = (
+        db.q(
+            "SELECT DISTINCT unnest(cves) AS cve FROM items "
+            "WHERE key <> %s AND cves && %s",
+            (key, it["cves"]),
+        )
+        if it["cves"]
+        else []
+    )
+    it["repeat"] = bool(it["cves"]) and set(it["cves"]) <= {r["cve"] for r in known}
+    return True
 
 
 def backfill_dates():
@@ -300,7 +318,18 @@ async def cycle(context: ContextTypes.DEFAULT_TYPE):
     last = db.get_state("last_run")
     first_run = last is None  # store the backlog, send nothing
     since = datetime.fromisoformat(last) if last else started - timedelta(hours=24)
-    vendors = db.q("SELECT name, nvd_keyword, nvd_cpe FROM vendors WHERE enabled")
+    # NVD is asked for changes since its last success, so an outage loses nothing
+    # (NVD accepts at most 120 days). The other sources return their whole list.
+    nvd_since = max(
+        datetime.fromisoformat(db.get_state("nvd_since") or since.isoformat()),
+        started - timedelta(days=119),
+    )
+    vendors = db.q(
+        "SELECT name, nvd_keyword, nvd_cpe, added_at FROM vendors WHERE enabled"
+    )
+    # Added since the last cycle (seed.yaml at start-up): their existing advisories,
+    # e.g. years of KEV entries, are stored silently, as on a first run.
+    fresh = {v["name"] for v in vendors if v["added_at"] > since}
     sources = db.q(
         "SELECT s.* FROM sources s JOIN vendors v ON v.name = s.vendor WHERE s.enabled AND v.enabled"
     )
@@ -308,7 +337,10 @@ async def cycle(context: ContextTypes.DEFAULT_TYPE):
     async with http() as client:
         jobs = [
             ("CISA KEV", lambda: col.fetch_kev(client, vendors)),
-            ("NVD", lambda: col.fetch_nvd(client, vendors, since)),
+            (
+                "NVD",
+                lambda: retry_once(lambda: col.fetch_nvd(client, vendors, nvd_since)),
+            ),
         ]
         jobs += [
             (
@@ -321,11 +353,13 @@ async def cycle(context: ContextTypes.DEFAULT_TYPE):
             try:
                 items = await job()
             except Exception as ex:  # noqa: BLE001 - one failing source never blocks the others
-                log.warning("source %s failed: %s", name, ex)
+                log.warning("source %s failed: %s", name, str(ex) or type(ex).__name__)
                 failed.append(name)
                 continue
-            new += [it for it in items if store(it)]
+            new += [it for it in items if store(it) and it["vendor"] not in fresh]
     db.set_state("last_run", started.isoformat())
+    db.set_state("nvd_since", (nvd_since if "NVD" in failed else started).isoformat())
+    warn, back = count_failures([name for name, _ in jobs], failed)
     db.set_state(
         "last_status",
         f"{when(started)} · {len(new)} new · failed: {', '.join(failed) or 'none'}",
@@ -338,7 +372,8 @@ async def cycle(context: ContextTypes.DEFAULT_TYPE):
     # source has just changed (NVD re-analysis), so it gets a one-line update.
     old = since - timedelta(days=1)
     for it in new:
-        text = fmt(it) if it["published_at"] >= old else update_line(it)
+        repeat = it.get("repeat") or it["published_at"] < old
+        text = update_line(it) if repeat else fmt(it)
         sent = False
         for user in users:
             if wants(user, it):
@@ -351,14 +386,40 @@ async def cycle(context: ContextTypes.DEFAULT_TYPE):
                 )
         if sent:
             await asyncio.sleep(1.1)  # Telegram: about 1 message/s per chat
-    if failed:
-        for user in users:
-            if is_admin(user["chat_id"], user):
-                await send(
-                    context.bot,
-                    user["chat_id"],
-                    "⚠️ Sources failed: " + ", ".join(failed),
-                )
+    notices = []
+    if warn:
+        notices.append(
+            f"⚠️ Failing for {WARN_AFTER} cycles in a row: {', '.join(warn)}. "
+            "What they missed is collected once they work again."
+        )
+    if back:
+        notices.append("✅ Working again: " + ", ".join(back))
+    for user in users:
+        if is_admin(user["chat_id"], user):
+            for text in notices:
+                await send(context.bot, user["chat_id"], text)
+
+
+async def retry_once(job):
+    """NVD often answers 503 or times out for a moment (e.g. around midnight UTC)."""
+    try:
+        return await job()
+    except httpx.HTTPStatusError as ex:
+        if ex.response.status_code < 500:
+            raise
+    except httpx.TransportError:
+        pass
+    await asyncio.sleep(NVD_RETRY)
+    return await job()
+
+
+def count_failures(names, failed):
+    """Count each source's failed cycles in a row; return those to warn about, and those back."""
+    before = json.loads(db.get_state("failures") or "{}")
+    db.set_state("failures", json.dumps({n: before.get(n, 0) + 1 for n in failed}))
+    warn = [n for n in failed if before.get(n, 0) + 1 == WARN_AFTER]
+    back = [n for n in names if n not in failed and before.get(n, 0) >= WARN_AFTER]
+    return warn, back
 
 
 # ---------- commands ----------
@@ -924,7 +985,8 @@ async def on_start(app):
 
 
 def main():
-    db.init()
+    if added := db.init():
+        log.info("vendors added from seed.yaml: %s", ", ".join(added))
     backfill_dates()
     backfill_ratings()
     app = Application.builder().token(TOKEN).post_init(on_start).build()

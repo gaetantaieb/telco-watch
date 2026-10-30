@@ -21,7 +21,8 @@ private chat; admins approve who can use it and manage what is monitored.
 - **Alerts in private chats**, one message per advisory: severity, CVSS, vendor,
   title, CVEs, publication date (Paris time) and link. Vendor ratings ("Severity:
   High") count like a CVSS score when there is none. An old advisory that its
-  source has just updated comes as a one-line update. Actively exploited (KEV)
+  source has just updated, or a CVE already alerted from another source (e.g.
+  added to CISA KEV later), comes as a one-line update. Actively exploited (KEV)
   advisories, and those with neither a score nor a rating, are always sent.
 - **Personal settings**: minimum severity (`/severity`) and muted vendors
   (`/mute`).
@@ -80,7 +81,7 @@ feeds ────┘                         └─> Telegram: one private chat
 | `collectors.py` | RSS, JSON, HTML, KEV and NVD fetchers; public-https URL guard |
 | `db.py` | Connection pools, schema init, seeding, state |
 | `schema.sql` | Tables, created or upgraded idempotently at every start |
-| `seed.yaml` | The 29 initial vendors and 3 vendor feeds, loaded once into an empty database |
+| `seed.yaml` | The telecom vendors, IT technologies and 3 vendor feeds; missing ones are added at every start |
 | `llm.py` | `/ask` assistant and its three read-only tools |
 | `onboard.py` | `/addvendor` discovery, validation and source testing |
 | `tests/test_bot.py` | Unit tests; no network or database needed |
@@ -150,8 +151,10 @@ and on pushes to `main`.
 - **Logs**: Railway → bot service → Deployments → View logs. Info goes to
   stdout, warnings and errors to stderr. Request URLs are not logged (they
   contain the bot token).
-- **Source down**: admins get "⚠️ Sources failed: …" after each failing cycle,
-  and `/status` shows the last cycle. If a vendor redesigned its site,
+- **Source down**: admins get "⚠️ Failing for 3 cycles in a row: …" (and "✅
+  Working again" later), and `/status` shows the last cycle. NVD often answers 503
+  around midnight UTC: it is retried once, and what it missed is collected once
+  it answers again. If a vendor redesigned its site,
   `/removevendor <name>` then `/addvendor <name>`.
 - **Too many alerts**: raise your `/severity`, `/mute` noisy vendors, or make a
   vendor's NVD keyword more specific (`UPDATE vendors SET nvd_keyword = …`).
