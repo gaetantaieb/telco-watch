@@ -1,6 +1,7 @@
 import asyncio
 import ipaddress
 import json
+import logging
 import os
 import re
 import socket
@@ -17,6 +18,7 @@ UA = {"User-Agent": "telco-watch-bot/1.0"}
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 NVD_KEY = os.environ.get("NVD_API_KEY")
+log = logging.getLogger("telco-watch")
 # The vendor's own rating, read from the advisory text when the source gives no score:
 # "CVSS v3.1 Base Score: 9.8", "(Severity: HIGH)", "Security Impact Rating: Critical".
 # A vector string ("CVSS:3.1/AV:N/...") is not a score.
@@ -246,8 +248,16 @@ async def fetch_nvd(client, vendors, since):
             "lastModEndDate": now.isoformat(timespec="milliseconds"),
         }
         r = await client.get(NVD_URL, params=params, headers=headers, timeout=60)
-        r.raise_for_status()
-        for entry in r.json().get("vulnerabilities", []):
+        if r.status_code in (
+            400,
+            404,
+        ):  # a wrong query (e.g. a bad CPE) loses one vendor
+            log.warning("NVD query rejected for %s: %s", v["name"], r.status_code)
+            entries = []
+        else:
+            r.raise_for_status()
+            entries = r.json().get("vulnerabilities", [])
+        for entry in entries:
             c, score = entry["cve"], None
             for k in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30"):
                 if c.get("metrics", {}).get(k):

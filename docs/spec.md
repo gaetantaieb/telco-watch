@@ -20,10 +20,17 @@ Objectives:
 
 ## 2. Scope
 
-**Vendors.** `seed.yaml` loads the 29 vendors of the original design (spec
-section 2.2) into an empty database: 8 tier 1 (Cisco, Juniper, Nokia, Ericsson,
-Huawei, ZTE, Fortinet, Palo Alto Networks), 9 tier 2 and 12 tier 3. After that,
-admins manage vendors from Telegram; the file is not read again.
+**Vendors.** `seed.yaml` holds the 29 telecom vendors of the original design (spec
+section 2.2): 8 tier 1 (Cisco, Juniper, Nokia, Ericsson, Huawei, ZTE, Fortinet,
+Palo Alto Networks), 9 tier 2 and 12 tier 3, plus Metaswitch and 20 IT
+technologies (PHP, Node.js, Python, Java, Kubernetes, k0s, Rook Ceph, Linux Kernel,
+Microsoft, PostgreSQL, Oracle, Hadoop, MongoDB, Apache Iceberg, Apache Parquet, Trino,
+Airflow, GitLab, GitHub, Jenkins), most matched in NVD by CPE. At every start, the
+vendors missing by name are added with their sources; their existing advisories are
+stored silently by the next cycle (section 3.1). Vendors already in the database,
+including those disabled with `/removevendor`, are managed from Telegram only.
+"Microsoft" used to match Metaswitch only; at start-up it becomes all Microsoft
+products (`cpe:2.3:*:microsoft`), and Metaswitch has its own entry.
 
 **Products and technologies.** `/addvendor` also accepts a product or technology
 (PHP, OpenSSL, Kubernetes…). These are matched in NVD by CPE so that CVEs that
@@ -38,17 +45,26 @@ A job runs 10 s after start, then every hour. Each cycle:
 1. reads the enabled vendors and their enabled sources from Postgres, so a vendor
    added from Telegram is collected from the next cycle without a redeploy;
 2. fetches CISA KEV, NVD, then each vendor source; a failing source is logged
-   and named in the cycle status, and never stops the others;
+   and named in the cycle status, and never stops the others. NVD is retried once,
+   30 s later, after a server error or a timeout (it often answers 503 around
+   midnight UTC). A vendor whose NVD query is rejected (400/404, e.g. a wrong CPE)
+   is logged and skipped; the other vendors are still queried;
 3. stores every item not already in the database (section 4);
 4. records `last_run` and the status line shown by `/status`;
 5. sends each new item to every active user who wants it (section 5): a full
    alert, or a one-line update when the item was published more than a day before
-   the previous cycle (section 5.2), then
-   "⚠️ Sources failed: …" to the admins if any source failed.
+   the previous cycle, or when all its CVEs were already stored from another item
+   (section 5.2); then, to the admins, "⚠️ Failing for 3 cycles in a row: …" once
+   a source has failed 3 cycles in a row (state `failures`), and "✅ Working
+   again: …" when such a source recovers.
 
 On the very first cycle (no `last_run`), the backlog is stored and nothing is
-sent. NVD is queried from `last_run` (or the last 24 h on the first run), so an
-outage is caught up on the next cycle.
+sent. The same goes for the items of a vendor added since the previous cycle
+(`vendors.added_at`), e.g. years of KEV entries for a vendor added to `seed.yaml`.
+NVD is queried from `nvd_since`, the start of its last successful cycle (or the
+last 24 h on the first run; at most 120 days, the NVD limit), so an NVD outage is
+caught up once it answers again. The other sources return their whole list each
+time.
 
 ### 3.2 Sources
 
@@ -136,7 +152,11 @@ A badge set by a vendor rating reads "· vendor rating" where a score would show
 
 An item published more than a day before the previous cycle is an old advisory
 that its source has just changed (typically an NVD re-analysis of an old CVE),
-not a new one. It is sent, with the same filters, as one line plus its link:
+not a new one. So is an item whose CVEs (all of them) were already stored from
+another item: the same CVE announced by the vendor, then NVD, then CISA KEV, or by
+two sources in the same cycle (the first is the alert). Either is sent, with the
+same filters, as one line plus its link; from CISA KEV, the line says "now
+actively exploited (CISA KEV)" after the badge:
 
 ```
 🔄 Update · 🟠 HIGH · CVSS 7.5 · Cisco · CVE-2019-1234 · <title> · published 12-03-2019 11:00 CET · last updated 27-10-2026 09:12 CET

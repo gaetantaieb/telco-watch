@@ -1,9 +1,12 @@
-# Initial vendors and sources (spec section 2.2), loaded once into an empty database.
-# Afterwards vendors are managed from Telegram (/addvendor, /removevendor), not from here.
+# Vendors and sources (spec section 2.2). At every start, vendors missing by name are
+# added (their existing advisories are stored silently); vendors already in the database
+# are managed from Telegram (/addvendor, /removevendor), not from here.
 #
 # nvd_keyword (defaults to name) is used twice: as the NVD keywordSearch, and as a
 # case-insensitive substring of the CISA KEV "vendorProject" field. Keep it short and
 # specific: a broad word (e.g. "Microsoft", "Oracle") floods NVD with unrelated CVEs.
+# nvd_cpe, when set, replaces the keyword in NVD: only CVEs of that product (or vendor,
+# for a partial CPE such as cpe:2.3:a:oracle) are collected.
 
 vendors:
   # Tier 1: polled hourly from its own advisory source, plus KEV/NVD
@@ -33,13 +36,35 @@ vendors:
   - {name: Zyxel}
   - {name: Calix}
   - {name: AudioCodes}
-  - {name: Microsoft, nvd_keyword: Metaswitch}      # Metaswitch, Azure Operator Nexus
+  - {name: Metaswitch}                              # Microsoft: Metaswitch, Azure Operator Nexus
   - {name: VMware, nvd_keyword: VMware}             # Broadcom
   - {name: Red Hat}                                 # OpenShift / OpenStack for CNF
   - {name: Enea, nvd_keyword: AdaptiveMobile}       # Enea / AdaptiveMobile
   - {name: Amdocs}                                  # Amdocs / Netcracker
   - {name: CommScope, nvd_keyword: Arris}           # Arris: DOCSIS CMTS, cable CPE
   - {name: Harmonic}                                # virtual CMTS, video headend
+
+  # IT: languages, infrastructure, data and CI/CD tools (issue #27), through NVD and KEV
+  - {name: PHP, nvd_cpe: "cpe:2.3:a:php:php"}
+  - {name: Node.js, nvd_cpe: "cpe:2.3:a:nodejs:node.js"}
+  - {name: Python, nvd_cpe: "cpe:2.3:a:python:python"}
+  - {name: Java, nvd_cpe: "cpe:2.3:a:oracle:jdk"}
+  - {name: Kubernetes, nvd_cpe: "cpe:2.3:a:kubernetes:kubernetes"}
+  - {name: k0s}
+  - {name: Rook Ceph, nvd_keyword: Ceph}
+  - {name: Linux Kernel, nvd_keyword: Linux, nvd_cpe: "cpe:2.3:o:linux:linux_kernel"}
+  - {name: Microsoft, nvd_cpe: "cpe:2.3:*:microsoft"}  # Windows, Office, Azure, Exchange
+  - {name: PostgreSQL, nvd_cpe: "cpe:2.3:a:postgresql:postgresql"}
+  - {name: Oracle, nvd_cpe: "cpe:2.3:a:oracle"}     # Database, Exadata, WebLogic, MySQL
+  - {name: Hadoop, nvd_cpe: "cpe:2.3:a:apache:hadoop"}
+  - {name: MongoDB, nvd_cpe: "cpe:2.3:a:mongodb:mongodb"}
+  - {name: Apache Iceberg, nvd_keyword: Iceberg}
+  - {name: Apache Parquet, nvd_keyword: Parquet}
+  - {name: Trino}
+  - {name: Airflow, nvd_cpe: "cpe:2.3:a:apache:airflow"}
+  - {name: GitLab, nvd_cpe: "cpe:2.3:a:gitlab:gitlab"}
+  - {name: GitHub, nvd_cpe: "cpe:2.3:a:github:enterprise_server"}
+  - {name: Jenkins, nvd_cpe: "cpe:2.3:a:jenkins"}   # core and plugins
 
 sources:
   - vendor: Cisco
