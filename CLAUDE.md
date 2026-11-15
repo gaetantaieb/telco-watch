@@ -20,3 +20,16 @@ Original design: docs/specs.pdf. Overview and setup: README.md.
   in place (same version); after it, start a new entry with a new version.
 - Every change adds or updates a test; run ruff format, ruff check and pytest before finishing.
 - Work on a branch and open a pull request; never push to main.
+
+## Agents (.claude/agents/)
+Use these subagents for every feature, behaviour change or bug fix, in this order:
+1. `product-owner` (brief): writes `docs/features/<slug>.md` with the functional
+   design and numbered acceptance criteria. Ask the user its open questions before coding.
+2. `architect` (plan): checks the approach against schema.sql, db.py, existing
+   functions and Railway; resolve every blocker before coding.
+3. Implement the change (main agent).
+4. `qa`: writes tests for each acceptance criterion, runs ruff format, ruff check, pytest.
+5. `architect` (diff): reviews the finished diff.
+6. `product-owner` (acceptance): checks the criteria, docs/spec.md and
+   release_notes.yaml; open the pull request only once it says ACCEPTED.
+Trivial changes (typos, docs only) can skip steps 1, 2 and 6; QA always runs.
